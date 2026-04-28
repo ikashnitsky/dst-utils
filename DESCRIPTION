@@ -28,4 +28,5 @@ Imports:
     rlang,
     DBI,
     ROracle,
-    DSTdb
+    DSTdb,
+    stringr

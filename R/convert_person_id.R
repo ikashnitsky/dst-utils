@@ -92,17 +92,17 @@ convert_person_id <- function(
 
   # TODO: make neater/write as a function?
 
-  procedure <- gsub('^"|"$', '', deparse(substitute(procedure)))
-  database <- gsub('^"|"$', '', deparse(substitute(database)))
-  in_data <- gsub('^"|"$', '', deparse(substitute(in_data)))
-  out_data <- gsub('^"|"$', '', deparse(substitute(out_data)))
-  recipient <- ifelse(
+  procedure <- stringr::str_remove_all(deparse(substitute(procedure)), '^"|"$')
+  database <- stringr::str_remove_all(deparse(substitute(database)), '^"|"$')
+  in_data <- stringr::str_remove_all(deparse(substitute(in_data)), '^"|"$')
+  out_data <- stringr::str_remove_all(deparse(substitute(out_data)), '^"|"$')
+  recipient <- dplyr::if_else(
     deparse(substitute(recipient)) == "Sys.getenv(\"USERNAME\")",
     recipient, # only update if it is input, otherwise keep username command
-    gsub('^"|"$', '', deparse(substitute(recipient)))
+    stringr::str_remove_all(deparse(substitute(recipient)), '^"|"$')
   )
-  out_table_name <- gsub('^"|"$', '', deparse(substitute(out_table_name)))
-  project_id <- gsub('^"|"$', '', deparse(substitute(project_id)))
+  out_table_name <- stringr::str_remove_all(deparse(substitute(out_table_name)), '^"|"$')
+  project_id <- stringr::str_remove_all(deparse(substitute(project_id)), '^"|"$')
 
   if (procedure == "NULL") {
     procedure <- NULL

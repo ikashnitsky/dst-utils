@@ -5,7 +5,7 @@
 #' @export
 add_person_id <- function(data) {
   # Get PNR from table
-  names(data) <- toupper(names(data))
+  data <- data |> dplyr::rename_with(toupper)
   cpr <- data |> dplyr::select(PNR) |> dplyr::distinct()
 
   # Convert id using convert_person_id
