@@ -1,7 +1,7 @@
 # agents.md — AI Assistant Instructions
 
 > Loaded automatically by Positron Assistant and GitHub Copilot coding agent.
-> Distilled from project-owner system prompts. Last updated: 2026-03-31.
+> Distilled from project-owner system prompts. Last updated: 2026-04-28.
 
 ---
 
