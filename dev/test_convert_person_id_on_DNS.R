@@ -2,7 +2,7 @@
 library(haven)
 
 # code for conversion of id
-source("K:/DSL/Konvertering til person-id/bef_personnummer.R")
+source("K:/DSL/Konvertering til person-id/convert_person_id.R")
 
 # read sas data
 dns2021 <- read_sas(
@@ -23,19 +23,19 @@ pnr <- as.data.frame(dns2021) |>
 # OBS: this is slow, collecting too much data into environment?
 
 # run conversion
-pnr_identer <- bef_personnummer(
-  #projektid="d101200",
+pnr_idents <- convert_person_id(
+  #project_id="d101200",
   procedure = "BEF_HISTORISK_ID",
-  ind_tabelnavn = pnr,
-  gyldighedsdato = 01012021
+  in_table_name = pnr,
+  validity_date = 01012021
 )
 
 
 # look at invalid id's
-invalid_person <- pnr_identer |> filter(PERSON_ID == 999999999999999)
+invalid_person <- pnr_idents |> filter(PERSON_ID == 999999999999999)
 
 # look at valid id's
-valid_person <- pnr_identer |>
+valid_person <- pnr_idents |>
   filter(PERSON_ID != 999999999999999) |>
   distinct(PERSON_ID, .keep_all = TRUE)
 # no duplicates!
@@ -43,35 +43,35 @@ valid_person <- pnr_identer |>
 # Note: error in SAS code when finding invalid id's using duplicates rather than 999999999999999
 
 # Collecting newer information on the pnr's with missing personid
-pnr_identer2 <- bef_personnummer(
-  #projektid=d101200,
+pnr_idents2 <- convert_person_id(
+  #project_id=d101200,
   procedure = "BEF_HISTORISK_ID",
-  ind_tabelnavn = invalid_person,
-  gyldighedsdato = 31122021
+  in_table_name = invalid_person,
+  validity_date = 31122021
 )
 # all found
 
 # Test of other procedures #########
 
 # full history rather than historic from specific time
-pnr_identer_fuld <- bef_personnummer(
+pnr_idents_full <- convert_person_id(
   procedure = "BEF_FULD_HISTORIK_PNR",
-  ind_tabelnavn = pnr
+  in_table_name = pnr
 )
 
 # looking at duplicates
-pnr_identer_fuld_dup <- pnr_identer_fuld |>
+pnr_idents_full_dup <- pnr_idents_full |>
   group_by(PNR) |>
   filter(n() > 1) |>
   ungroup()
 # for all duplicates, nothing has changed...
 
 #person_id data including duplicates
-person_id_fuld <- tibble(PERSON_ID = pnr_identer_fuld$PERSON_ID)
+person_id_full <- tibble(PERSON_ID = pnr_idents_full$PERSON_ID)
 
 # looking at id changes
-id_skift_fuld <- bef_personnummer(
+id_shift_full <- convert_person_id(
   procedure = "BEF_IDSKIFT",
-  ind_tabelnavn = person_id_fuld
+  in_table_name = person_id_full
 )
 # none for these data
