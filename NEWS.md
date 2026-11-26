@@ -1,5 +1,18 @@
 # DSTutils (development version)
 
+* `convert_person_id()` is restructured; its arguments and the PL/SQL sent to the BEF procedures are unchanged:
+  * Inputs are checked before connecting, so bad procedure/date combinations no longer upload data to `DB_PSD` first. The combination error lists what the procedure accepts.
+  * Work tables (`BEF_ID_PROC`, `PSDMYTEMP` and the output table) are dropped on every exit, including when a privilege check fails. Tables left by an interrupted run are dropped before the next run.
+  * Fixed: each call leaked a second connection to `DB_PSD`.
+  * Fixed: run ids such as 3000000 were turned into `"3e+06"`. The output table was then not found, and the PNR mapping was left in the user's schema.
+  * Fixed: `procedure = my_var` and `project_id = paste0(...)` sent the literal text to Oracle. Variables and expressions are now evaluated. Quoted strings and bare words work as before.
+  * Milliseconds in `registry_time`, `registry_start_time` and `registry_end_time` are kept instead of being dropped.
+  * `column_name` now works: it names the id column to upload as `PNR`/`PERSON_ID`.
+  * `in_data = "ORACLE"` and `out_data = "ORACLE"` fail at once with "not implemented". Before, `out_data = "ORACLE"` ran the conversion and returned `NULL`.
+  * Privilege checks now count privileges granted through roles (`session_privs`, `all_tab_privs`).
+  * The procedure's result text and the registry time used are shown with `message()` instead of `print()`.
+  * The PL/SQL for every date mode is snapshot-tested, and the call sequence is tested against a fake database.
+
 * `dst_db_privilege_management()` is rewritten:
   * New `dry_run = TRUE` mode runs the full app against a simulated schema, without `DSTdb` or a database.
   * The log no longer lives inside the installed package (where it was lost on reinstall and usually not writable). It is resolved from the `log_dir` argument, the `DSTutils.privilege_log_dir` option, the `DSTUTILS_PRIVILEGE_LOG_DIR` environment variable, or a per-user default. Writes use a lock, so a team can share one log.

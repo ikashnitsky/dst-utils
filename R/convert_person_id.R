@@ -1,153 +1,278 @@
-# NOTES:
-# - Input data has to be a data set with one column named either PNR or PERSON_ID (depending on procedure)
-#   - The column type can be numbers or characters (or factor) it just has to have a form that the Oracle-procedure recognizes
-# - The function returns the converted data so it has to be run as "data_id <- bef_personnummer(procedure,data,...)"
-# - When an id cannot be found, PNR becomes "Ukendt-PNR" and person_id becomes 999999999999999 (15 nines)
-# - The variable 'projekt_id' is only used to indicate which project ran the conversion. Per default
-#   this function inputs user ident. It can in principle be any random sequence of characters.
-# - The variable 'registry_time' requires 'validity_date' to be input but 'validity_date' does not require 'registry_time'
-# - The variables 'registry_start_time' and 'registry_end_time' need to both be input to work (or neither)
-# - The function is not strict about datetime format
-#   - see lubridate::parse_date_time and list of orders in function call for accepted formats
-#   - all other formats than 01012021 need to be written as a character - e.g. '01-01-1900 12:00:00'
-# - The datetime variables cannot take a column of dates as input, only one value
-# - The SAS macro has 'database' as an option for where the procedures are located, in this function
-#   'database' is where data is located. This function only takes conversion procedures from db_psd
+# Person ID conversion via the BEF procedures in DB_PSD ----------------------
+#
+# For names and explanations of the procedures see "Metodevejledning
+# konvertering mellem cpr og person_id..." in
+# "G:\k22\01 Metode\Diskretionering\Pseudonymisering".
+#
+# The Oracle side is not under our control. What is sent to it must stay
+# compatible with the procedures, in particular:
+# * the Danish PL/SQL parameter names: p_projektnummer, p_bruger,
+#   p_ind_tabelnavn, p_gyldighedsdato, p_registerdato, p_registerstarttid,
+#   p_registersluttid, p_resultat, p_koerselsid;
+# * the package names, the output-table prefixes and the date-argument
+#   combinations each procedure accepts (`bef_procedures` below);
+# * the work tables BEF_ID_PROC (input) and PSDMYTEMP (run id).
+# The generated PL/SQL is snapshot-tested in
+# tests/testthat/_snaps/convert_person_id.md, so any change to it shows up in
+# review.
+#
+# Open work is planned in dev/TODO.md.
 
-# TODO (EKSTRA):
-# - implement variable for whether input data is located in R or Oracle (in_data)
-#   - variabel for in_database, inkl. tjek for lÃ¦se-rettigheder
-#   - also requires indicator for whether data is in db_psd, statprod, statudv etc
-#     - note that procedures are in db_psd
-#   - check that database and data exist (use table_exists function)
-# - implement variable for whether out_table should be returned in R or saved in Oracle (out_data)
-#   - tilfÃ¸j variabel for out_database, inkl. tjek for skrive-rettigheder
-#   - i SAS-makroen gemmes data ved output til Oracle blot i &prefix_name&v_koerselsid i ident-skema pÃ¥ PSD
-#     - do the same here?
-# - opdatÃ©r 'column_name' til at tages som input i funktion
-#   - problem: right now Oracle procedures do not take table name as input
-# - update code to only fetch unique rows when data passes through the environment
-# - test functions on person IDs with shifts
+# Procedure specification -----------------------------------------------------
 
-# TODO (FEJL OG TJEK):
-# - check that it is the correct column (name, type, length etc)
-#   - check name (DONE)
-#   - lav en variabel 'column_name' som i SAS (DONE), sÃ¥ det let kan udtages til tjek i Oracle (mangler)
-#   - also check column type (right now character, factor, and integer work - but does this also apply in Oracle) and column length (maybe only relevant for Oracle?)
-# - remember to have toupper() for all name checks
+# `call`: package the procedure is called through.
+# `grant`: package the EXECUTE privilege is checked on.
+bef_packages <- list(
+  laes = list(
+    call = "BEF01_pck_laes_personnummer",
+    grant = "BEF_PCK_LAES_PERSONNUMMER"
+  ),
+  omkod = list(
+    call = "BEF01_pck_omkodning",
+    grant = "BEF_PCK_OMKODNING"
+  )
+)
 
-# TODO (UNDERSÃ˜G):
-# - investigate: which format do people typically insert for dates and times?
-# - is it a problem that R does not include milliseconds in the datetime format?
-#   - dte er ikke et problem i at hente, men er der nogen, der user millisekunder til at matche?
-# - hvordan holder folk styr pÃ¥, hvornÃ¥r man skal bruge validity_date+registry_time eller registry_start_time+registry_end_time?
-# - how does the function behave if one has not gained access to the conversion tables or to PSD?
+# Date modes (which date arguments are sent to the procedure):
+# * "none":     no date arguments
+# * "validity": p_gyldighedsdato
+# * "historic": p_gyldighedsdato + p_registerdato (looked up when not given)
+# * "range":    p_registerstarttid + p_registersluttid
+bef_proc <- function(prefix, id_column, date_modes, package = "laes") {
+  list(
+    prefix = prefix,
+    id_column = id_column,
+    date_modes = date_modes,
+    package = bef_packages[[package]]
+  )
+}
 
-# Create function -------------------------------------------------------------
+bef_procedures <- list(
+  # PNR -> PERSON_ID
+  BEF_OMKOD = bef_proc("PNROMKOD", "PNR", c("none", "validity"), "omkod"),
+  BEF_AKTUELLE_ID = bef_proc("AKT_ID", "PNR", c("none", "validity")),
+  BEF_HISTORISK_ID = bef_proc("HIS_ID", "PNR", "historic"),
+  BEF_FULD_HISTORIK_PNR = bef_proc("FULDHISPNR", "PNR", c("none", "range")),
+  # PERSON_ID -> PNR
+  BEF_AKTUELLE_PNR = bef_proc("AKTPNR", "PERSON_ID", c("none", "validity")),
+  BEF_HISTORISK_PNR = bef_proc("HISPNR", "PERSON_ID", "historic"),
+  BEF_FULD_HISTORIK_ID = bef_proc("FULDHISID", "PERSON_ID", c("none", "range")),
+  # PERSON_ID -> sex and birthday
+  BEF_AKTUEL_KOEN_FOEDSELSDAG = bef_proc(
+    "AKTKONFOD",
+    "PERSON_ID",
+    c("none", "validity")
+  ),
+  BEF_HISTORISK_KOEN_FOEDSELSDAG = bef_proc("HISKONFOD", "PERSON_ID", "historic"),
+  BEF_FULD_HIS_KOEN_FOEDSELSDAG = bef_proc(
+    "FULDHISKON",
+    "PERSON_ID",
+    c("none", "range")
+  ),
+  # PERSON_ID shifts
+  BEF_IDSKIFT = bef_proc("IDSKIFT", "PERSON_ID", "none"),
+  # Invalid ids; takes no input table
+  BEF_INVALIDE = bef_proc("INVALIDE", NA_character_, c("none", "range"))
+)
 
-# For names and explanations of procedures see "Metodevejledning konvertering mellem cpr og person_id..."
-# in "G:\k22\01 Metode\Diskretionering\Pseudonymisering"
+# Main function -----------------------------------------------------------------
 
 #' @title Convert between CPR and PERSON_ID
-#' @description This function converts between CPR and PERSON_ID.
-#' @param procedure Name of Oracle-procedure (e.g. "BEF_HISTORISK_ID").
-#' @param database Location of input data (e.g. 'DB_PSD').
-#' @param in_data 'R' or 'ORACLE'.
-#' @param out_data 'R' or 'ORACLE'.
-#' @param column_name Name of the column, if specific.
-#' @param recipient User ident.
-#' @param in_table_name Name of input table.
-#' @param out_table_name Name of output table.
-#' @param project_id Project ID, e.g. "D101200".
-#' @param validity_date Validity date.
-#' @param registry_time Registry time.
-#' @param registry_start_time Registry start time.
-#' @param registry_end_time Registry end time.
-#' @return A data.frame with converted IDs, if out_data='R'.
+#'
+#' @description Runs one of the BEF conversion procedures in `DB_PSD`
+#'   (Oracle) on a data frame of `PNR`s or `PERSON_ID`s and returns the
+#'   procedure's output table.
+#'
+#' @details
+#' **Procedures and their input column**
+#'
+#' | Procedure | Input column | Date arguments |
+#' |---|---|---|
+#' | `BEF_OMKOD`, `BEF_AKTUELLE_ID` | `PNR` | none, or `validity_date` |
+#' | `BEF_HISTORISK_ID` | `PNR` | `validity_date`, optionally `registry_time` |
+#' | `BEF_FULD_HISTORIK_PNR` | `PNR` | none, or `registry_start_time` + `registry_end_time` |
+#' | `BEF_AKTUELLE_PNR`, `BEF_AKTUEL_KOEN_FOEDSELSDAG` | `PERSON_ID` | none, or `validity_date` |
+#' | `BEF_HISTORISK_PNR`, `BEF_HISTORISK_KOEN_FOEDSELSDAG` | `PERSON_ID` | `validity_date`, optionally `registry_time` |
+#' | `BEF_FULD_HISTORIK_ID`, `BEF_FULD_HIS_KOEN_FOEDSELSDAG` | `PERSON_ID` | none, or `registry_start_time` + `registry_end_time` |
+#' | `BEF_IDSKIFT` | `PERSON_ID` | none |
+#' | `BEF_INVALIDE` | (no input table) | none, or `registry_start_time` + `registry_end_time` |
+#'
+#' Any other combination of date arguments is an error. For the historic
+#' procedures, a missing `registry_time` is looked up in
+#' `D101200.bef_leverance_time` (the first delivery covering
+#' `validity_date`).
+#'
+#' **Ids that cannot be found** come back as `PNR = "Ukendt-PNR"` or
+#' `PERSON_ID = 999999999999999` (15 nines).
+#'
+#' **Dates and times** are parsed with [lubridate::parse_date_time()] using the
+#' orders `ymd HMS`, `dmy HMS`, `mdy HMS`, `ymd HM`, `dmy HM`, `mdy HM`, `ymd`,
+#' `dmy` and `mdy`. Each one must be a single value, not a column. A number
+#' works for plain dates (`31122021`). Anything with a time must be a string,
+#' e.g. `"31-12-2021 12:00:00"`. Milliseconds are kept
+#' (`"31129999 235959.999"`).
+#'
+#' **Character arguments** (`procedure`, `database`, `in_data`, `out_data`,
+#' `recipient`, `out_table_name`, `project_id`) can be quoted
+#' (`procedure = "BEF_OMKOD"`), a bare word (`procedure = BEF_OMKOD`) or a
+#' variable holding a string (`procedure = my_proc`).
+#'
+#' **Side effects in DB_PSD.** The function writes the input to `BEF_ID_PROC`
+#' and the run id to `PSDMYTEMP` in your own schema, and the procedure writes
+#' its output table there too. All three are dropped when the function exits,
+#' also on error. If an earlier, interrupted run left `BEF_ID_PROC` or
+#' `PSDMYTEMP` behind, they are dropped first. Do not run two conversions at
+#' the same time under the same user, because they share these table names.
+#'
+#' @param procedure Name of the Oracle procedure, e.g. `"BEF_HISTORISK_ID"`
+#'   (case-insensitive). See Details.
+#' @param database Reserved for reading/writing data in other databases once
+#'   `in_data`/`out_data = "ORACLE"` is implemented. The procedures always run
+#'   in `DB_PSD`.
+#' @param in_data Where the input data is: `"R"`. `"ORACLE"` is not
+#'   implemented yet.
+#' @param out_data Where the output should go: `"R"` (returned). `"ORACLE"` is
+#'   not implemented yet.
+#' @param column_name Optional name of the id column in `in_table_name`, if it
+#'   is not already called `PNR`/`PERSON_ID` as the procedure requires. It is
+#'   renamed before upload.
+#' @param recipient User ident passed to the procedure (`p_bruger`). Defaults
+#'   to the Windows user name. `NULL` sends an empty value.
+#' @param in_table_name A data frame with the id column the procedure needs
+#'   (`PNR` or `PERSON_ID`, any case). Not used by `BEF_INVALIDE`.
+#' @param out_table_name Name of the output table when `out_data = "ORACLE"`
+#'   (not implemented yet). Ignored otherwise.
+#' @param project_id Project that runs the conversion (`p_projektnummer`),
+#'   e.g. `"D101200"`. Only used for logging on the Oracle side. Defaults to the
+#'   user ident.
+#' @param validity_date Validity date: returns rows where this date lies
+#'   between `VFRA` and `VTIL`, e.g. `31122021` or `"2021-12-31"`.
+#' @param registry_time Registry time: returns rows where this time lies
+#'   between `RFRA` and `RTIL`. Requires `validity_date`.
+#' @param registry_start_time,registry_end_time Registry interval, both or
+#'   neither: returns rows where `RTIL > registry_start_time` and
+#'   `RFRA <= registry_end_time`, e.g. `"01011900 00:00:00"`.
+#'
+#' @return A data frame: the output table of the procedure.
+#'
+#' @seealso [add_person_id()] for the common PNR -> PERSON_ID case.
+#'
+#' @examples
+#' \dontrun{
+#' # Current PERSON_ID for a set of PNRs
+#' pnr <- data.frame(PNR = c("0101011234", "0202024321"))
+#' ids <- convert_person_id(
+#'   procedure = "BEF_AKTUELLE_ID",
+#'   in_table_name = pnr,
+#'   project_id = "D101200"
+#' )
+#'
+#' # PNR valid on 31 December 2021 (registry time looked up automatically)
+#' pid <- data.frame(PERSON_ID = ids$PERSON_ID)
+#' convert_person_id(
+#'   procedure = "BEF_HISTORISK_PNR",
+#'   in_table_name = pid,
+#'   validity_date = 31122021
+#' )
+#'
+#' # Full history within a registry interval
+#' convert_person_id(
+#'   procedure = "BEF_FULD_HISTORIK_ID",
+#'   in_table_name = pid,
+#'   registry_start_time = "01011900 00:00:00",
+#'   registry_end_time = "31122100 23:59:59"
+#' )
+#' }
 #' @export
 convert_person_id <- function(
-  procedure = NULL, # Name of procedure e.g. "BEF_HISTORISK_ID"
-  database = 'DB_PSD', # Location of input data if in Oracle
-  # change to in_database and out_database?
-  in_data = "R", # "R" or "ORACLE" depending on where input data is located
-  out_data = "R", # "R" or "ORACLE" depending on where output data should be located
+  procedure = NULL,
+  database = 'DB_PSD',
+  in_data = "R",
+  out_data = "R",
   column_name = NULL,
   recipient = Sys.getenv("USERNAME"),
-  in_table_name = NULL, # Name of input data (needs to be character if in_data="ORACLE")
-  out_table_name = NULL, # Only relevant if 'data="Oracle"' since output in R is returned
-  project_id = NULL, # E.g. "D101200" - default is user ident if nothing is input
-  validity_date = NULL, # Returns data where this date is between VFRA and VTIL e.g. 01012021  or '01-01-2021 12:00:00'
-  registry_time = NULL, # Returns data where this date is between RFRA and RTIL e.g. 01012021  or '01-01-2021 12:00:00'
-  registry_start_time = NULL, # e.g. 01011900 or '01-01-1900 12:00:00'
-  registry_end_time = NULL # e.g. 01012100 or '01-01-2100 12:00:00'
-  # Returns data where RTIL>registry_start_time and RFRA<=registry_end_time
+  in_table_name = NULL,
+  out_table_name = NULL,
+  project_id = NULL,
+  validity_date = NULL,
+  registry_time = NULL,
+  registry_start_time = NULL,
+  registry_end_time = NULL
 ) {
-  # TODO: INPUT UPDATED VARIABLES FULLY
-  # database
-  # in_data and out_data if ="ORACLE"
-  # in_table_name (skal kun hentes fra env, hvis in_data=R, ellers character)
-
-  # HANDLE CHARACTER VARIABLE ####
-  # Ensure that character variables can be input both with and without quotations
-
-  # TODO: make neater/write as a function?
-
-  procedure <- stringr::str_remove_all(deparse(substitute(procedure)), '^"|"$')
-  database <- stringr::str_remove_all(deparse(substitute(database)), '^"|"$')
-  in_data <- stringr::str_remove_all(deparse(substitute(in_data)), '^"|"$')
-  out_data <- stringr::str_remove_all(deparse(substitute(out_data)), '^"|"$')
-  recipient <- if (deparse(substitute(recipient)) == "Sys.getenv(\"USERNAME\")") {
-    recipient # only update if it is input, otherwise keep username command
-  } else {
-    stringr::str_remove_all(deparse(substitute(recipient)), '^"|"$')
+  # READ CHARACTER ARGUMENTS ####
+  # Quoted, bare word, or a variable holding a string
+  caller <- parent.frame()
+  procedure <- arg_as_string(substitute(procedure), caller, "procedure")
+  database <- arg_as_string(substitute(database), caller, "database")
+  in_data <- arg_as_string(substitute(in_data), caller, "in_data")
+  out_data <- arg_as_string(substitute(out_data), caller, "out_data")
+  if (!missing(recipient)) {
+    recipient <- arg_as_string(substitute(recipient), caller, "recipient")
   }
-  out_table_name <- stringr::str_remove_all(
-    deparse(substitute(out_table_name)),
-    '^"|"$'
+  out_table_name <- arg_as_string(
+    substitute(out_table_name),
+    caller,
+    "out_table_name"
   )
-  project_id <- stringr::str_remove_all(
-    deparse(substitute(project_id)),
-    '^"|"$'
-  )
+  project_id <- arg_as_string(substitute(project_id), caller, "project_id")
 
-  if (procedure == "NULL") {
-    procedure <- NULL
-  }
-  if (database == "NULL") {
-    database <- NULL
-  }
-  if (in_data == "NULL") {
-    in_data <- NULL
-  }
-  if (out_data == "NULL") {
-    out_data <- NULL
-  }
-  if (recipient == "NULL") {
-    recipient <- NULL
-  }
-  if (out_table_name == "NULL") {
-    out_table_name <- NULL
-  }
-  if (project_id == "NULL") {
-    project_id <- NULL
-  }
+  # VALIDATE INPUT (before touching the database) ####
+  spec <- bef_procedure(procedure)
+  procedure <- spec$name
 
-  # ESTABLISH CONNECTIONS ####
-
-  # Connections
-  psd <- DSTdb::get_conn('DB_PSD', namespace = "bef_personnummer")
-
-  if (!is.null(database)) {
-    conn <- DSTdb::get_conn(
-      paste(toupper(database)),
-      namespace = "bef_personnummer"
+  in_data <- check_location(in_data, "in_data")
+  out_data <- check_location(out_data, "out_data")
+  if (in_data == "ORACLE") {
+    stop(
+      "in_data = 'ORACLE' is not implemented yet. ",
+      "Read the table into R and pass it as a data frame (in_table_name=).",
+      call. = FALSE
+    )
+  }
+  if (out_data == "ORACLE") {
+    stop(
+      "out_data = 'ORACLE' is not implemented yet. ",
+      "Use out_data = 'R' and write the returned data frame yourself.",
+      call. = FALSE
+    )
+  }
+  if (!is.null(out_table_name)) {
+    message(
+      "NOTE: Variablen 'out_table_name' ignoreres, da output-tabellen returneres i R (out_data=R)."
     )
   }
 
-  # User
-  user <- Sys.getenv("USERNAME")
+  input <- NULL
+  if (!is.na(spec$id_column)) {
+    if (is.null(in_table_name)) {
+      stop("Angiv navnet p\u00e5 input-tabellen (in_table_name=).", call. = FALSE)
+    }
+    input <- prepare_input_table(
+      in_table_name,
+      spec$id_column,
+      column_name,
+      procedure
+    )
+  } else if (!is.null(in_table_name)) {
+    message("NOTE: ", procedure, " takes no input table; 'in_table_name' is ignored.")
+  }
 
-  # Define project_id as user if not given
+  date_mode <- resolve_date_mode(
+    spec,
+    validity_date = validity_date,
+    registry_time = registry_time,
+    registry_start_time = registry_start_time,
+    registry_end_time = registry_end_time
+  )
+  dates <- parse_conversion_dates(
+    date_mode,
+    validity_date = validity_date,
+    registry_time = registry_time,
+    registry_start_time = registry_start_time,
+    registry_end_time = registry_end_time
+  )
+
+  user <- Sys.getenv("USERNAME")
   if (is.null(project_id)) {
     project_id <- user
     message(paste0(
@@ -157,585 +282,548 @@ convert_person_id <- function(
     ))
   }
 
-  # Check rights to write in DB_PSD (required for all procedures)
-  psd_rights <- DBI::dbGetQuery(
+  # CONNECT; ALL WORK TABLES ARE DROPPED ON EXIT, ALSO ON ERROR ####
+  psd <- connect_psd()
+  schema <- NULL
+  created_tables <- character()
+  on.exit(cleanup_psd(psd, created_tables, schema), add = TRUE)
+
+  schema <- psd_query(psd, "SELECT USER AS SCHEMA_NAME FROM DUAL")$SCHEMA_NAME
+  check_psd_privileges(psd, spec, user)
+  drop_leftover_tables(psd, schema)
+
+  # UPLOAD INPUT AND RUN THE PROCEDURE ####
+  if (!is.null(input)) {
+    created_tables <- c(created_tables, "BEF_ID_PROC")
+    psd_write_table(psd, "BEF_ID_PROC", input)
+  }
+
+  # PSDMYTEMP receives the procedure's OUT values (result text and run id)
+  created_tables <- c(created_tables, "PSDMYTEMP")
+  psd_execute(
     psd,
-    "select * from user_sys_privs
-                                     where privilege = 'CREATE TABLE'"
+    "create table PSDMYTEMP (v_resultat VARCHAR2(200), v_koerselsid NUMBER)"
   )
-  if (nrow(psd_rights) == 0) {
-    stop(paste0(
-      user,
-      " does not have privileges to create tables in DB_PSD."
-    ))
+
+  if (date_mode == "historic" && is.null(dates$registry)) {
+    dates$registry <- lookup_registry_time(psd, dates$validity)
   }
 
-  # TODO: should this be the db-schema as well?
+  plsql <- build_bef_plsql(
+    spec,
+    project_id = project_id,
+    recipient = recipient,
+    date_mode = date_mode,
+    dates = dates
+  )
+  psd_run_plsql(psd, plsql)
 
-  # Check rights to write in database where database should be written to
-  if (toupper(out_data) == "ORACLE") {
-    database_rights <- DBI::dbGetQuery(
-      conn,
-      "select * from user_sys_privs
-                                       where privilege = 'CREATE TABLE'"
+  # COLLECT THE OUTPUT TABLE ####
+  run <- read_run_info(psd)
+  message(run$result)
+
+  # The procedure saves its output as <prefix><run id> in the user's schema
+  out_name <- paste0(spec$prefix, run$id)
+  created_tables <- c(created_tables, out_name)
+  if (!table_exists(psd, out_name, schema)) {
+    stop(
+      "Something went wrong during execution: the output table ",
+      out_name,
+      " was not created. Procedure result: ",
+      run$result,
+      call. = FALSE
     )
-    if (nrow(database_rights) == 0) {
-      stop(paste0(
-        user,
-        " does not have privileges to create tables in the database ",
-        database
-      ))
-    }
   }
 
-  # SET FUNCTIONS TO RUN ON EXIT ####
+  psd_query(psd, paste0("select * from ", out_name))
+}
 
-  # Ensure that temporary tables are dropped even if an error occurs in the script
-  on.exit(
-    # Drop temporary table for output of procedure
-    if (table_exists(psd, "PSDMYTEMP", user)) {
-      DBI::dbSendQuery(psd, "drop table PSDMYTEMP")
-    }
-  )
-  on.exit(
-    if (table_exists(psd, "BEF_ID_PROC", user)) {
-      # Drop temporary table for input data
-      DBI::dbSendQuery(psd, "drop table BEF_ID_PROC")
-    },
-    add = TRUE
-  )
-  # Close connection to psd
-  on.exit(
-    DBI::dbDisconnect(psd),
-    add = TRUE
-  )
-  # Close connection to database
-  on.exit(
-    if (!is.null(database) & database != "DB_PSD") {
-      DBI::dbDisconnect(conn)
-    },
-    add = TRUE
-  )
+# Input handling (no database) ------------------------------------------------
 
-  # CHECK PROCEDURE ####
+#' Read a character argument given quoted, as a bare word or as a variable
+#'
+#' Keeps the historical interface where `procedure = BEF_OMKOD` (unquoted)
+#' works, while also allowing `procedure = my_proc` and
+#' `project_id = paste0(...)`, which the old `deparse(substitute())` approach
+#' silently turned into the literal text "my_proc" / "paste0(...)".
+#' A bare word is taken as a variable only if a character (or NULL) object of
+#' that name exists; otherwise the word itself is used.
+#' @noRd
+arg_as_string <- function(expr, env, arg) {
+  value <- if (is.symbol(expr)) {
+    name <- as.character(expr)
+    obj <- if (exists(name, envir = env)) get(name, envir = env) else name
+    if (is.null(obj) || is.character(obj) || is.factor(obj)) obj else name
+  } else {
+    eval(expr, env)
+  }
 
-  # Error message if no/wrong procedure is given
+  if (is.null(value)) {
+    return(NULL)
+  }
+  if (is.factor(value)) {
+    value <- as.character(value)
+  }
+  if (is.numeric(value) && length(value) == 1) {
+    value <- format(value, scientific = FALSE, trim = TRUE)
+  }
+  if (!is.character(value) || length(value) != 1 || is.na(value)) {
+    stop("'", arg, "' must be a single character string.", call. = FALSE)
+  }
+  value
+}
+
+#' Look up the specification of a BEF procedure
+#' @noRd
+bef_procedure <- function(procedure) {
   if (is.null(procedure)) {
     stop(
-      "Specify the name of the Oracle procedure you want to execute (procedure=)."
+      "Specify the name of the Oracle procedure you want to execute (procedure=).",
+      call. = FALSE
     )
-  } else if (
-    !(toupper(procedure) %in%
-      c(
-        'BEF_AKTUELLE_PNR',
-        'BEF_HISTORISK_PNR',
-        'BEF_FULD_HISTORIK_ID',
-        'BEF_IDSKIFT',
-        'BEF_AKTUEL_KOEN_FOEDSELSDAG',
-        'BEF_HISTORISK_KOEN_FOEDSELSDAG',
-        'BEF_FULD_HIS_KOEN_FOEDSELSDAG',
-        'BEF_OMKOD',
-        'BEF_AKTUELLE_ID',
-        'BEF_HISTORISK_ID',
-        'BEF_FULD_HISTORIK_PNR',
-        'BEF_INVALIDE'
-      ))
-  ) {
-    stop("The specified Oracle procedure is not recognized.")
+  }
+  name <- toupper(procedure)
+  if (!name %in% names(bef_procedures)) {
+    stop(
+      "The specified Oracle procedure is not recognized: ",
+      procedure,
+      ". Known procedures: ",
+      paste(names(bef_procedures), collapse = ", "),
+      ".",
+      call. = FALSE
+    )
+  }
+  c(list(name = name), bef_procedures[[name]])
+}
+
+#' Validate `in_data` / `out_data`
+#' @noRd
+check_location <- function(x, arg) {
+  if (is.null(x) || !toupper(x) %in% c("R", "ORACLE")) {
+    stop("'", arg, "' must be \"R\" or \"ORACLE\".", call. = FALSE)
+  }
+  toupper(x)
+}
+
+#' Check the input data frame and give the id column the required name
+#' @noRd
+prepare_input_table <- function(data, id_column, column_name, procedure) {
+  if (!is.data.frame(data)) {
+    stop(
+      "'in_table_name' must be a data frame with a ",
+      id_column,
+      " column. ",
+      "(Reading the input from an Oracle table, in_data = 'ORACLE', is not implemented yet.)",
+      call. = FALSE
+    )
   }
 
-  # Name of created table (when adding v_koerselsid) for given procedure
-  prefix_name = dplyr::case_when(
-    toupper(procedure) == 'BEF_OMKOD' ~ 'PNROMKOD',
-    toupper(procedure) == 'BEF_AKTUELLE_ID' ~ 'AKT_ID',
-    toupper(procedure) == 'BEF_HISTORISK_ID' ~ 'HIS_ID',
-    toupper(procedure) == 'BEF_FULD_HISTORIK_PNR' ~ 'FULDHISPNR',
-    toupper(procedure) == 'BEF_AKTUELLE_PNR' ~ 'AKTPNR',
-    toupper(procedure) == 'BEF_HISTORISK_PNR' ~ 'HISPNR',
-    toupper(procedure) == 'BEF_FULD_HISTORIK_ID' ~ 'FULDHISID',
-    toupper(procedure) == 'BEF_AKTUEL_KOEN_FOEDSELSDAG' ~ 'AKTKONFOD',
-    toupper(procedure) == 'BEF_HISTORISK_KOEN_FOEDSELSDAG' ~ 'HISKONFOD',
-    toupper(procedure) == 'BEF_FULD_HIS_KOEN_FOEDSELSDAG' ~ 'FULDHISKON',
-    toupper(procedure) == 'BEF_IDSKIFT' ~ 'IDSKIFT',
-    toupper(procedure) == 'BEF_INVALIDE' ~ 'INVALIDE'
-  )
-
-  # Select different pack for BEF_OMKOD
-  package01 = dplyr::if_else(
-    toupper(procedure) == 'BEF_OMKOD',
-    'BEF01_pck_omkodning',
-    'BEF01_pck_laes_personnummer'
-  )
-  package = dplyr::if_else(
-    toupper(procedure) == 'BEF_OMKOD',
-    'BEF_PCK_OMKODNING',
-    'BEF_PCK_LAES_PERSONNUMMER'
-  )
-
-  # Define required column name for each procedure (except 'BEF_INVALIDE')
-  if (
-    toupper(procedure) %in%
-      c(
-        'BEF_OMKOD',
-        'BEF_AKTUELLE_ID',
-        'BEF_HISTORISK_ID',
-        'BEF_FULD_HISTORIK_PNR'
-      )
-  ) {
-    column_name = "PNR"
-  } else if (
-    toupper(procedure) %in%
-      c(
-        'BEF_AKTUELLE_PNR',
-        'BEF_HISTORISK_PNR',
-        'BEF_FULD_HISTORIK_ID',
-        'BEF_IDSKIFT',
-        'BEF_AKTUEL_KOEN_FOEDSELSDAG',
-        'BEF_HISTORISK_KOEN_FOEDSELSDAG',
-        'BEF_FULD_HIS_KOEN_FOEDSELSDAG'
-      )
-  ) {
-    column_name = "PERSON_ID"
+  names(data) <- toupper(names(data))
+  dups <- unique(names(data)[duplicated(names(data))])
+  if (length(dups) > 0) {
+    stop(
+      "Column names in the input table must be unique regardless of case. ",
+      "Duplicated: ",
+      paste(dups, collapse = ", "),
+      call. = FALSE
+    )
   }
 
-  # Check if user has the rights to run the procedure
-  proc_rights <- DBI::dbGetQuery(
-    psd,
+  if (!is.null(column_name)) {
+    column_name <- toupper(column_name)
+    if (!column_name %in% names(data)) {
+      stop(
+        "There is no column ",
+        column_name,
+        " (column_name=) in the input table.",
+        call. = FALSE
+      )
+    }
+    if (column_name != id_column) {
+      if (id_column %in% names(data)) {
+        stop(
+          "The input table has both ",
+          column_name,
+          " (column_name=) and ",
+          id_column,
+          ". Drop or rename one of them.",
+          call. = FALSE
+        )
+      }
+      names(data)[names(data) == column_name] <- id_column
+      message(
+        "NOTE: Column ",
+        column_name,
+        " is uploaded as ",
+        id_column,
+        ", the name ",
+        procedure,
+        " requires."
+      )
+    }
+  }
+
+  if (!id_column %in% names(data)) {
+    stop(
+      paste0("There is no column ", id_column, " in the input table."),
+      call. = FALSE
+    )
+  }
+  data
+}
+
+#' Decide which date arguments are sent to the procedure
+#'
+#' Returns one of "none", "validity", "historic" or "range"; see
+#' `bef_procedures`.
+#' @noRd
+resolve_date_mode <- function(
+  spec,
+  validity_date = NULL,
+  registry_time = NULL,
+  registry_start_time = NULL,
+  registry_end_time = NULL
+) {
+  has_validity <- !is.null(validity_date)
+  has_registry <- !is.null(registry_time)
+  has_start <- !is.null(registry_start_time)
+  has_end <- !is.null(registry_end_time)
+
+  if (xor(has_start, has_end)) {
+    stop(
+      "En af parameterene registry_start_time eller registry_end_time er udfyldt, enten skal begge eller ingen v\u00e6re udfyldt.",
+      call. = FALSE
+    )
+  }
+
+  supplied <- if (has_start) {
+    if (has_validity || has_registry) "invalid" else "range"
+  } else if (has_validity) {
+    if (has_registry) "validity+registry" else "validity"
+  } else if (has_registry) {
+    "invalid"
+  } else {
+    "none"
+  }
+
+  modes <- spec$date_modes
+  mode <- switch(
+    supplied,
+    none = if ("none" %in% modes) "none",
+    validity = if ("validity" %in% modes) {
+      "validity"
+    } else if ("historic" %in% modes) {
+      "historic"
+    },
+    `validity+registry` = if ("historic" %in% modes) "historic",
+    range = if ("range" %in% modes) "range",
+    invalid = NULL
+  )
+
+  if (is.null(mode)) {
+    allowed <- c(
+      none = "no date arguments",
+      validity = "validity_date",
+      historic = "validity_date (optionally with registry_time)",
+      range = "registry_start_time + registry_end_time"
+    )[modes]
+    stop(
+      "Der er et problem med kombinationen af procedure og de angivne dato- og tidsparametre.\n",
+      spec$name,
+      " accepts: ",
+      paste(allowed, collapse = "; or "),
+      ".",
+      call. = FALSE
+    )
+  }
+  mode
+}
+
+#' Parse a single date/time argument into Oracle-ready strings
+#' @noRd
+parse_datetime_arg <- function(x, arg) {
+  if (length(x) != 1) {
+    stop(
+      "'",
+      arg,
+      "' must be a single value; a column of dates is not supported.",
+      call. = FALSE
+    )
+  }
+  parsed <- suppressWarnings(extract_date_time(x))
+  if (is.na(parsed$date) || is.na(parsed$time)) {
+    stop("Ukendt format for '", arg, "'.", call. = FALSE)
+  }
+  date <- format(parsed$date, "%Y-%m-%d")
+  list(date = date, datetime = paste(date, parsed$time))
+}
+
+#' Parse the date arguments that the chosen date mode uses
+#' @noRd
+parse_conversion_dates <- function(
+  date_mode,
+  validity_date = NULL,
+  registry_time = NULL,
+  registry_start_time = NULL,
+  registry_end_time = NULL
+) {
+  dates <- list()
+  if (date_mode %in% c("validity", "historic")) {
+    dates$validity <- parse_datetime_arg(validity_date, "validity_date")$date
+  }
+  if (date_mode == "historic" && !is.null(registry_time)) {
+    dates$registry <- parse_datetime_arg(registry_time, "registry_time")$datetime
+  }
+  if (date_mode == "range") {
+    dates$start <- parse_datetime_arg(
+      registry_start_time,
+      "registry_start_time"
+    )$datetime
+    dates$end <- parse_datetime_arg(registry_end_time, "registry_end_time")$datetime
+  }
+  dates
+}
+
+# PL/SQL ------------------------------------------------------------------------
+
+#' Quote a value as an Oracle string literal; NULL becomes ''
+#' @noRd
+sql_string <- function(x) {
+  if (is.null(x)) {
+    return("''")
+  }
+  paste0("'", gsub("'", "''", x, fixed = TRUE), "'")
+}
+
+sql_date <- function(x) {
+  paste0("TO_DATE(", sql_string(x), ", 'YYYY-MM-DD')")
+}
+
+sql_timestamp <- function(x) {
+  paste0("TO_TIMESTAMP(", sql_string(x), ", 'YYYY-MM-DD HH24:MI:SS.FF')")
+}
+
+#' Build the anonymous PL/SQL block that runs a BEF procedure
+#'
+#' The procedure creates its output table <prefix><run id> in the user's
+#' schema. Its OUT values are stored in PSDMYTEMP so R can find that table.
+#' @noRd
+build_bef_plsql <- function(spec, project_id, recipient, date_mode, dates) {
+  args <- c(
+    p_projektnummer = sql_string(project_id),
+    p_bruger = sql_string(recipient),
+    if (!is.na(spec$id_column)) c(p_ind_tabelnavn = "'BEF_ID_PROC'"),
+    switch(
+      date_mode,
+      none = NULL,
+      validity = c(p_gyldighedsdato = sql_date(dates$validity)),
+      historic = c(
+        p_gyldighedsdato = sql_date(dates$validity),
+        p_registerdato = sql_timestamp(dates$registry)
+      ),
+      range = c(
+        p_registerstarttid = sql_timestamp(dates$start),
+        p_registersluttid = sql_timestamp(dates$end)
+      )
+    ),
+    p_resultat = "v_resultat",
+    p_koerselsid = "v_koerselsid"
+  )
+  arg_names <- formatC(names(args), width = -max(nchar(names(args))))
+
+  paste0(
+    "DECLARE\n",
+    "  v_resultat   VARCHAR2(200);\n",
+    "  v_koerselsid NUMBER;\n",
+    "BEGIN\n",
+    "  ",
+    spec$package$call,
+    ".",
+    spec$name,
+    "(\n",
+    paste0("    ", arg_names, " => ", args, collapse = ",\n"),
+    "\n  );\n",
+    "  -- Store the OUT values so R can find the output table\n",
+    "  insert into psdmytemp values (v_resultat, v_koerselsid);\n",
+    "  COMMIT;\n",
+    "END;"
+  )
+}
+
+#' Format the run id for use in a table name (never scientific notation)
+#' @noRd
+format_run_id <- function(id) {
+  sprintf("%.0f", as.numeric(id))
+}
+
+# Database steps ----------------------------------------------------------------
+# Thin wrappers so the flow can be tested with a fake database.
+
+psd_connect <- function() {
+  DSTdb::get_conn('DB_PSD', namespace = "bef_personnummer")
+}
+
+psd_query <- function(conn, sql) {
+  DBI::dbGetQuery(conn, sql)
+}
+
+psd_execute <- function(conn, sql) {
+  res <- DBI::dbSendQuery(conn, sql)
+  DBI::dbClearResult(res)
+  invisible(TRUE)
+}
+
+psd_write_table <- function(conn, name, data) {
+  DBI::dbWriteTable(conn, name, data)
+}
+
+psd_run_plsql <- function(conn, plsql) {
+  ROracle::oracleProc(conn, plsql)
+}
+
+psd_disconnect <- function(conn) {
+  DBI::dbDisconnect(conn)
+}
+
+#' Connect to DB_PSD with a readable error if that is not possible
+#' @noRd
+connect_psd <- function() {
+  tryCatch(
+    psd_connect(),
+    error = function(e) {
+      stop(
+        "Could not connect to DB_PSD. Check that you have been granted access to PSD.\n",
+        conditionMessage(e),
+        call. = FALSE
+      )
+    }
+  )
+}
+
+#' Check CREATE TABLE in DB_PSD and EXECUTE on the procedure's package
+#'
+#' `session_privs` and `all_tab_privs` include privileges granted through
+#' roles and to PUBLIC, which `user_sys_privs` / `user_tab_privs` miss.
+#' @noRd
+check_psd_privileges <- function(conn, spec, user) {
+  create_rights <- psd_query(
+    conn,
+    "SELECT privilege FROM session_privs WHERE privilege = 'CREATE TABLE'"
+  )
+  if (nrow(create_rights) == 0) {
+    stop(
+      user,
+      " does not have privileges to create tables in DB_PSD.",
+      call. = FALSE
+    )
+  }
+
+  proc_rights <- psd_query(
+    conn,
     paste0(
-      "SELECT privilege FROM user_tab_privs
-                                      WHERE table_name = '",
-      package,
+      "SELECT privilege FROM all_tab_privs WHERE table_name = '",
+      spec$package$grant,
       "'"
     )
   )
   if (nrow(proc_rights) == 0) {
-    stop(paste0(
+    stop(
       user,
       " does not have privileges to execute the procedure ",
-      procedure
-    ))
-  }
-
-  # CHECK INPUT DATA AND CREATE ORACLE TABLES ####
-
-  # Check data is input
-  if (is.null(in_table_name) & toupper(procedure) != "BEF_INVALIDE") {
-    stop("Angiv navnet p\u00e5 input-tabellen (in_table_name=).")
-  }
-
-  #####TODO: set up and correct for different output and input data and locations
-
-  if (is.null(out_table_name) & toupper(out_data) == "ORACLE") {
-    stop(
-      "Angiv navnet p\u00e5 output-tabellen (out_table_name=), der gemmes i Oracle (out_data=ORACLE)."
+      spec$name,
+      call. = FALSE
     )
   }
+}
 
-  if (!is.null(out_table_name) & toupper(out_data) == "R") {
-    message(
-      "NOTE: Variablen 'out_table_name' ignoreres, da output-tabellen returneres i R (out_data=R)."
-    )
-  }
-
-  # Check column names and save data to Oracle
-  if (!is.null(in_table_name)) {
-    names(in_table_name) <- toupper(names(in_table_name))
-
-    # Does data include a column with the required column name
-    if (!(column_name %in% names(in_table_name))) {
-      stop(paste0(
-        "There is no column ",
-        column_name,
-        " in the input table."
-      ))
+#' Drop work tables left behind by an interrupted earlier run
+#'
+#' Otherwise creating them fails, and a stale PSDMYTEMP row could point to the
+#' wrong output table.
+#' @noRd
+drop_leftover_tables <- function(conn, schema) {
+  for (tbl in c("BEF_ID_PROC", "PSDMYTEMP")) {
+    if (table_exists(conn, tbl, schema)) {
+      message(
+        "NOTE: Dropping table ",
+        tbl,
+        " left in DB_PSD by an earlier, interrupted run."
+      )
+      psd_execute(conn, paste0("drop table ", tbl))
     }
-
-    DBI::dbWriteTable(psd, "BEF_ID_PROC", in_table_name)
   }
+}
 
-  # Create table 'PSDMYTEMP' on ident schema in dp_psd to store temporary data
-  DBI::dbSendQuery(
-    psd,
-    "create table PSDMYTEMP
-                            (v_resultat   VARCHAR2(200),
-                            v_koerselsid NUMBER)"
+#' Find the registry time for a validity date in D101200.bef_leverance_time
+#' @noRd
+lookup_registry_time <- function(conn, validity_date) {
+  tid <- psd_query(
+    conn,
+    paste0(
+      "select tid from (select min(time_stamp) as tid ",
+      "from D101200.bef_leverance_time ",
+      "where trunc(cpr_slut) >= TO_DATE('",
+      validity_date,
+      "','YYYY-MM-DD'))"
+    )
+  )$TID
+  if (length(tid) == 0 || is.na(tid[1])) {
+    stop(
+      paste(
+        "Gyldighedsdato",
+        validity_date,
+        "findes ikke i PSD registry_time tabellen."
+      ),
+      call. = FALSE
+    )
+  }
+  tid <- as.character(tid[1])
+  message(paste(
+    "The registry datetime used is =",
+    tid,
+    "fetched from the PSD table D101200.bef_leverance_time."
+  ))
+  tid
+}
+
+#' Read the procedure's result text and run id from PSDMYTEMP
+#' @noRd
+read_run_info <- function(conn) {
+  run <- psd_query(
+    conn,
+    "select v_resultat as RESULTAT, v_koerselsid as KOERSELSID from psdmytemp"
   )
-
-  # HANDLE DATETIME VARIABLES ####
-
-  if (!is.null(validity_date)) {
-    validity_date <- extract_date_time(validity_date)$date
-    if (is.na(validity_date)) {
-      stop("Ukendt format for 'validity_date'.")
-    }
-  }
-
-  if (!is.null(registry_start_time)) {
-    date_start <- extract_date_time(registry_start_time)$date
-    time_start <- extract_date_time(registry_start_time)$time
-    if (is.na(date_start) | is.na(time_start)) {
-      stop("Ukendt format for 'registry_start_time'.")
-    }
-  }
-
-  if (!is.null(registry_end_time)) {
-    date_end <- extract_date_time(registry_end_time)$date
-    time_end <- extract_date_time(registry_end_time)$time
-    if (is.na(date_end) | is.na(time_end)) {
-      stop("Ukendt format for 'registry_end_time'.")
-    }
-  }
-
-  # RUN PROCEDURES ####
-
-  # Run procedure - procedures without dates
-  if (
-    toupper(procedure) %in%
-      c(
-        'BEF_OMKOD',
-        'BEF_AKTUELLE_ID',
-        'BEF_AKTUELLE_PNR',
-        'BEF_AKTUEL_KOEN_FOEDSELSDAG',
-        'BEF_FULD_HISTORIK_ID',
-        'BEF_FULD_HISTORIK_PNR',
-        'BEF_FULD_HIS_KOEN_FOEDSELSDAG',
-        'BEF_IDSKIFT'
-      ) &
-      is.null(validity_date) &
-      is.null(registry_time) &
-      is.null(registry_start_time) &
-      is.null(registry_end_time)
-  ) {
-    # Run procedure - automatically saves table in ident schema and saves the run id in psdmytemp
-    ROracle::oracleProc(
-      psd,
-      paste0(
-        "DECLARE  v_resultat VARCHAR2(200);
-                                   v_koerselsid NUMBER;\n",
-        "BEGIN ",
-        package01,
-        ".",
-        procedure,
-        "
-                                  (p_projektnummer => '",
-        project_id,
-        "',
-                                  p_bruger => '",
-        recipient,
-        "',
-                                  p_ind_tabelnavn => 'BEF_ID_PROC',
-                                  p_resultat => v_resultat,
-                                  p_koerselsid => v_koerselsid);
-
-                                  -- Insert values into mytemp to identify output table later
-                                  insert into psdmytemp values (v_resultat,V_koerselsid);
-                              COMMIT;
-                             END;"
-      )
+  if (nrow(run) == 0 || all(is.na(run$KOERSELSID))) {
+    stop(
+      "Something went wrong during execution: the procedure returned no run id.",
+      if (nrow(run) > 0) paste0(" Procedure result: ", run$RESULTAT[1]),
+      call. = FALSE
     )
-  } else if (
-    toupper(procedure) %in%
-      c(
-        'BEF_OMKOD',
-        'BEF_AKTUELLE_ID',
-        'BEF_AKTUELLE_PNR',
-        'BEF_AKTUEL_KOEN_FOEDSELSDAG'
-      ) &
-      !is.null(validity_date) &
-      is.null(registry_time) &
-      is.null(registry_start_time) &
-      is.null(registry_end_time)
-  ) {
-    # Run procedure - procedures with a date
-    # Run procedure - automatically saves table in ident schema and saves the run id in psdmytemp
-    ROracle::oracleProc(
-      psd,
-      paste0(
-        "DECLARE  v_resultat VARCHAR2(200);
-                                   v_koerselsid NUMBER;\n",
-        "BEGIN ",
-        package01,
-        ".",
-        procedure,
-        "
-                                  (p_projektnummer => '",
-        project_id,
-        "',
-                                  p_bruger => '",
-        recipient,
-        "',
-                                  p_ind_tabelnavn => 'BEF_ID_PROC',
-                                  p_gyldighedsdato=> TO_DATE('",
-        validity_date,
-        "','YYYY-MM-DD'),
-                                  p_resultat => v_resultat,
-                                  p_koerselsid => v_koerselsid);
+  }
+  i <- which.max(run$KOERSELSID)
+  list(result = run$RESULTAT[i], id = format_run_id(run$KOERSELSID[i]))
+}
 
-                                  -- Insert values into mytemp to identify output table later
-                                  insert into psdmytemp values (v_resultat,V_koerselsid);
-                              COMMIT;
-                             END;"
-      )
-    )
-  } else if (
-    toupper(procedure) %in%
-      c(
-        'BEF_HISTORISK_ID',
-        'BEF_HISTORISK_PNR',
-        'BEF_HISTORISK_KOEN_FOEDSELSDAG'
-      ) &
-      !is.null(validity_date) &
-      is.null(registry_start_time) &
-      is.null(registry_end_time)
-  ) {
-    # Run procedure - procedures with a date and time (historisk)
-    # find 'registry_time' if it isn't given as input
-    if (is.null(registry_time)) {
-      registry_time <- DBI::dbGetQuery(
-        psd,
-        paste0(
-          "select tid from
-				(select min(time_stamp) as tid
-				 from D101200.bef_leverance_time
-				 where trunc(cpr_slut) >= TO_DATE('",
-          validity_date,
-          "','YYYY-MM-DD'))"
+#' Drop the work tables this call created, then disconnect
+#'
+#' Runs from on.exit(), so it must not throw: failures become warnings.
+#' @noRd
+cleanup_psd <- function(conn, tables, schema) {
+  for (tbl in rev(unique(tables))) {
+    tryCatch(
+      if (table_exists(conn, tbl, schema)) {
+        psd_execute(conn, paste0("drop table ", tbl))
+      },
+      error = function(e) {
+        warning(
+          "Could not drop the table ",
+          tbl,
+          " in DB_PSD; drop it manually. ",
+          conditionMessage(e),
+          call. = FALSE
         )
-      )$TID
-      if (is.na(registry_time)) {
-        stop(paste(
-          "Gyldighedsdato",
-          validity_date,
-          "findes ikke i PSD registry_time tabellen."
-        ))
-      } else {
-        print(paste(
-          "The registry datetime used is =",
-          registry_time,
-          "fetched from the PSD table D101200.bef_leverance_time."
-        ))
       }
-    } else {
-      date_registry <- extract_date_time(registry_time)$date
-      time_registry <- extract_date_time(registry_time)$time
-      if (is.na(date_registry) | is.na(time_registry)) {
-        stop("Ukendt format for 'registry_time'.")
-      }
-      registry_time <- paste(date_registry, time_registry)
-    }
-
-    # Run procedure - automatically saves table in ident schema and saves the run id in psdmytemp
-    ROracle::oracleProc(
-      psd,
-      paste0(
-        "DECLARE  v_resultat VARCHAR2(200);
-                                   v_koerselsid NUMBER;\n",
-        "BEGIN ",
-        package01,
-        ".",
-        procedure,
-        "
-                                  (p_projektnummer => '",
-        project_id,
-        "',
-                                  p_bruger => '",
-        recipient,
-        "',
-                                  p_ind_tabelnavn => 'BEF_ID_PROC',
-                                  p_gyldighedsdato=> TO_DATE('",
-        validity_date,
-        "','YYYY-MM-DD'),
-                                  p_registerdato => TO_TIMESTAMP ('",
-        registry_time,
-        "','YYYY-MM-DD HH24:MI:SS.FF'),
-                                  p_resultat => v_resultat,
-                                  p_koerselsid => v_koerselsid);
-
-                                  -- Insert values into mytemp to identify output table later
-                                  insert into psdmytemp values (v_resultat,V_koerselsid);
-                              COMMIT;
-                             END;"
-      )
-    )
-  } else if (
-    toupper(procedure) %in%
-      c(
-        'BEF_FULD_HISTORIK_ID',
-        'BEF_FULD_HISTORIK_PNR',
-        'BEF_FULD_HIS_KOEN_FOEDSELSDAG'
-      ) &
-      !is.null(registry_start_time) &
-      !is.null(registry_end_time) &
-      is.null(validity_date) &
-      is.null(registry_time)
-  ) {
-    # Run procedure - procedures with dates and time (fuld historisk)
-    # Run procedure - automatically saves table in ident schema and saves the run id in psdmytemp
-    ROracle::oracleProc(
-      psd,
-      paste0(
-        "DECLARE  v_resultat VARCHAR2(200);
-                                   v_koerselsid NUMBER;\n",
-        "BEGIN ",
-        package01,
-        ".",
-        procedure,
-        "
-                                  (p_projektnummer => '",
-        project_id,
-        "',
-                                  p_bruger => '",
-        recipient,
-        "',
-                                  p_ind_tabelnavn => 'BEF_ID_PROC',
-                								  p_registerstarttid => TO_TIMESTAMP ('",
-        date_start,
-        " ",
-        time_start,
-        "','YYYY-MM-DD HH24:MI:SS.FF'),
-                								  p_registersluttid => TO_TIMESTAMP ('",
-        date_end,
-        " ",
-        time_end,
-        "','YYYY-MM-DD HH24:MI:SS.FF'),
-                                  p_resultat => v_resultat,
-                                  p_koerselsid => v_koerselsid);
-
-                                  -- Insert values into mytemp to identify output table later
-                                  insert into psdmytemp values (v_resultat,V_koerselsid);
-                              COMMIT;
-                             END;"
-      )
-    )
-  } else if (
-    toupper(procedure) %in%
-      c('BEF_INVALIDE') &
-      is.null(registry_start_time) &
-      is.null(registry_end_time) &
-      is.null(validity_date) &
-      is.null(registry_time)
-  ) {
-    # Run procedure - bef_invalide without dates (no input table)
-    # Run procedure - automatically saves table in ident schema and saves the run id in psdmytemp
-    ROracle::oracleProc(
-      psd,
-      paste0(
-        "DECLARE  v_resultat VARCHAR2(200);
-                                   v_koerselsid NUMBER;\n",
-        "BEGIN ",
-        package01,
-        ".",
-        procedure,
-        "
-                                  (p_projektnummer => '",
-        project_id,
-        "',
-                                  p_bruger => '",
-        recipient,
-        "',
-                                  p_resultat => v_resultat,
-                                  p_koerselsid => v_koerselsid);
-
-                                  -- Insert values into mytemp to identify output table later
-                                  insert into psdmytemp values (v_resultat,V_koerselsid);
-                              COMMIT;
-                             END;"
-      )
-    )
-  } else if (
-    toupper(procedure) %in%
-      c('BEF_INVALIDE') &
-      !is.null(registry_start_time) &
-      !is.null(registry_end_time) &
-      is.null(validity_date) &
-      is.null(registry_time)
-  ) {
-    # Run procedure - bef_invalide with dates (no input table)
-    # Run procedure - automatically saves table in ident schema and saves the run id in psdmytemp
-    ROracle::oracleProc(
-      psd,
-      paste0(
-        "DECLARE  v_resultat VARCHAR2(200);
-                                   v_koerselsid NUMBER;\n",
-        "BEGIN ",
-        package01,
-        ".",
-        procedure,
-        "
-                                  (p_projektnummer => '",
-        project_id,
-        "',
-                                  p_bruger => '",
-        recipient,
-        "',
-                								  p_registerstarttid => TO_TIMESTAMP ('",
-        date_start,
-        " ",
-        time_start,
-        "','YYYY-MM-DD HH24:MI:SS.FF'),
-                								  p_registersluttid => TO_TIMESTAMP ('",
-        date_end,
-        " ",
-        time_end,
-        "','YYYY-MM-DD HH24:MI:SS.FF'),
-                                  p_resultat => v_resultat,
-                                  p_koerselsid => v_koerselsid);
-
-                                  -- Insert values into mytemp to identify output table later
-                                  insert into psdmytemp values (v_resultat,V_koerselsid);
-                              COMMIT;
-                             END;"
-      )
-    )
-  } else if (
-    (!is.null(registry_start_time) & is.null(registry_end_time)) |
-      (is.null(registry_start_time) & !is.null(registry_end_time))
-  ) {
-    stop(
-      "En af parameterene registry_start_time eller registry_end_time er udfyldt, enten skal begge eller ingen v\u00e6re udfyldt."
-    )
-  } else {
-    stop(
-      "Der er et problem med kombinationen af procedure og de angivne dato- og tidsparametre.
-         Tjek, hvilke dato- og tidsparametre den angivne procedure benytter."
     )
   }
-
-  # CREATE OUTPUT TABLE ####
-
-  if (table_exists(psd, "PSDMYTEMP", user)) {
-    # Collect v_koerselsid from temporary table
-    v_koerselsid <- DBI::dbGetQuery(
-      psd,
-      "select max(v_koerselsid) as X from psdmytemp"
-    )$X[1]
-
-    # Print result of process (successfully run or not)
-    print(DBI::dbGetQuery(psd, "select v_resultat as X from psdmytemp")$X[1])
-  } else {
-    stop("Something went wrong during execution.")
-  }
-
-  if (table_exists(psd, toupper(paste0(prefix_name, v_koerselsid)), user)) {
-    # Create output table
-    out_table <- DBI::dbGetQuery(
-      psd,
-      paste0("select * from ", prefix_name, v_koerselsid)
-    )
-
-    # Drop id table from ident schema
-    DBI::dbSendQuery(psd, paste0("drop table ", prefix_name, v_koerselsid))
-  } else {
-    stop("Something went wrong during execution.")
-  }
-
-  # Save or return output table:
-  if (toupper(out_data) == "R") {
-    # return the output table
-    return(out_table)
-  } else if (toupper(out_data) == "ORACLE") {
-    # TODO
-    # Save data to Oracle and don't return anything to R?
-    # Just save the list of converted id's to the ident chema in the same database as original data
-  }
+  tryCatch(psd_disconnect(conn), error = function(e) invisible(NULL))
 }

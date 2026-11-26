@@ -21,35 +21,122 @@ convert_person_id(
 )
 }
 \arguments{
-\item{procedure}{Name of Oracle-procedure (e.g. "BEF_HISTORISK_ID").}
+\item{procedure}{Name of the Oracle procedure, e.g. \code{"BEF_HISTORISK_ID"}
+(case-insensitive). See Details.}
 
-\item{database}{Location of input data (e.g. 'DB_PSD').}
+\item{database}{Reserved for reading/writing data in other databases once
+\code{in_data}/\code{out_data = "ORACLE"} is implemented. The procedures always run
+in \code{DB_PSD}.}
 
-\item{in_data}{'R' or 'ORACLE'.}
+\item{in_data}{Where the input data is: \code{"R"}. \code{"ORACLE"} is not
+implemented yet.}
 
-\item{out_data}{'R' or 'ORACLE'.}
+\item{out_data}{Where the output should go: \code{"R"} (returned). \code{"ORACLE"} is
+not implemented yet.}
 
-\item{column_name}{Name of the column, if specific.}
+\item{column_name}{Optional name of the id column in \code{in_table_name}, if it
+is not already called \code{PNR}/\code{PERSON_ID} as the procedure requires. It is
+renamed before upload.}
 
-\item{recipient}{User ident.}
+\item{recipient}{User ident passed to the procedure (\code{p_bruger}). Defaults
+to the Windows user name. \code{NULL} sends an empty value.}
 
-\item{in_table_name}{Name of input table.}
+\item{in_table_name}{A data frame with the id column the procedure needs
+(\code{PNR} or \code{PERSON_ID}, any case). Not used by \code{BEF_INVALIDE}.}
 
-\item{out_table_name}{Name of output table.}
+\item{out_table_name}{Name of the output table when \code{out_data = "ORACLE"}
+(not implemented yet). Ignored otherwise.}
 
-\item{project_id}{Project ID, e.g. "D101200".}
+\item{project_id}{Project that runs the conversion (\code{p_projektnummer}),
+e.g. \code{"D101200"}. Only used for logging on the Oracle side. Defaults to the
+user ident.}
 
-\item{validity_date}{Validity date.}
+\item{validity_date}{Validity date: returns rows where this date lies
+between \code{VFRA} and \code{VTIL}, e.g. \code{31122021} or \code{"2021-12-31"}.}
 
-\item{registry_time}{Registry time.}
+\item{registry_time}{Registry time: returns rows where this time lies
+between \code{RFRA} and \code{RTIL}. Requires \code{validity_date}.}
 
-\item{registry_start_time}{Registry start time.}
-
-\item{registry_end_time}{Registry end time.}
+\item{registry_start_time, registry_end_time}{Registry interval, both or
+neither: returns rows where \code{RTIL > registry_start_time} and
+\code{RFRA <= registry_end_time}, e.g. \code{"01011900 00:00:00"}.}
 }
 \value{
-A data.frame with converted IDs, if out_data='R'.
+A data frame: the output table of the procedure.
 }
 \description{
-This function converts between CPR and PERSON_ID.
+Runs one of the BEF conversion procedures in \code{DB_PSD}
+(Oracle) on a data frame of \code{PNR}s or \code{PERSON_ID}s and returns the
+procedure's output table.
+}
+\details{
+\strong{Procedures and their input column}\tabular{lll}{
+   Procedure \tab Input column \tab Date arguments \cr
+   \code{BEF_OMKOD}, \code{BEF_AKTUELLE_ID} \tab \code{PNR} \tab none, or \code{validity_date} \cr
+   \code{BEF_HISTORISK_ID} \tab \code{PNR} \tab \code{validity_date}, optionally \code{registry_time} \cr
+   \code{BEF_FULD_HISTORIK_PNR} \tab \code{PNR} \tab none, or \code{registry_start_time} + \code{registry_end_time} \cr
+   \code{BEF_AKTUELLE_PNR}, \code{BEF_AKTUEL_KOEN_FOEDSELSDAG} \tab \code{PERSON_ID} \tab none, or \code{validity_date} \cr
+   \code{BEF_HISTORISK_PNR}, \code{BEF_HISTORISK_KOEN_FOEDSELSDAG} \tab \code{PERSON_ID} \tab \code{validity_date}, optionally \code{registry_time} \cr
+   \code{BEF_FULD_HISTORIK_ID}, \code{BEF_FULD_HIS_KOEN_FOEDSELSDAG} \tab \code{PERSON_ID} \tab none, or \code{registry_start_time} + \code{registry_end_time} \cr
+   \code{BEF_IDSKIFT} \tab \code{PERSON_ID} \tab none \cr
+   \code{BEF_INVALIDE} \tab (no input table) \tab none, or \code{registry_start_time} + \code{registry_end_time} \cr
+}
+
+
+Any other combination of date arguments is an error. For the historic
+procedures, a missing \code{registry_time} is looked up in
+\code{D101200.bef_leverance_time} (the first delivery covering
+\code{validity_date}).
+
+\strong{Ids that cannot be found} come back as \code{PNR = "Ukendt-PNR"} or
+\code{PERSON_ID = 999999999999999} (15 nines).
+
+\strong{Dates and times} are parsed with \code{\link[lubridate:parse_date_time]{lubridate::parse_date_time()}} using the
+orders \verb{ymd HMS}, \verb{dmy HMS}, \verb{mdy HMS}, \verb{ymd HM}, \verb{dmy HM}, \verb{mdy HM}, \code{ymd},
+\code{dmy} and \code{mdy}. Each one must be a single value, not a column. A number
+works for plain dates (\code{31122021}). Anything with a time must be a string,
+e.g. \code{"31-12-2021 12:00:00"}. Milliseconds are kept
+(\code{"31129999 235959.999"}).
+
+\strong{Character arguments} (\code{procedure}, \code{database}, \code{in_data}, \code{out_data},
+\code{recipient}, \code{out_table_name}, \code{project_id}) can be quoted
+(\code{procedure = "BEF_OMKOD"}), a bare word (\code{procedure = BEF_OMKOD}) or a
+variable holding a string (\code{procedure = my_proc}).
+
+\strong{Side effects in DB_PSD.} The function writes the input to \code{BEF_ID_PROC}
+and the run id to \code{PSDMYTEMP} in your own schema, and the procedure writes
+its output table there too. All three are dropped when the function exits,
+also on error. If an earlier, interrupted run left \code{BEF_ID_PROC} or
+\code{PSDMYTEMP} behind, they are dropped first. Do not run two conversions at
+the same time under the same user, because they share these table names.
+}
+\examples{
+\dontrun{
+# Current PERSON_ID for a set of PNRs
+pnr <- data.frame(PNR = c("0101011234", "0202024321"))
+ids <- convert_person_id(
+  procedure = "BEF_AKTUELLE_ID",
+  in_table_name = pnr,
+  project_id = "D101200"
+)
+
+# PNR valid on 31 December 2021 (registry time looked up automatically)
+pid <- data.frame(PERSON_ID = ids$PERSON_ID)
+convert_person_id(
+  procedure = "BEF_HISTORISK_PNR",
+  in_table_name = pid,
+  validity_date = 31122021
+)
+
+# Full history within a registry interval
+convert_person_id(
+  procedure = "BEF_FULD_HISTORIK_ID",
+  in_table_name = pid,
+  registry_start_time = "01011900 00:00:00",
+  registry_end_time = "31122100 23:59:59"
+)
+}
+}
+\seealso{
+\code{\link[=add_person_id]{add_person_id()}} for the common PNR -> PERSON_ID case.
 }
