@@ -12,6 +12,41 @@ is snapshot-tested in `tests/testthat/_snaps/convert_person_id.md`. If a
 snapshot changes, run `tests/testthat/test-convert_person_id.R` against the
 real `DB_PSD` before merging.
 
+## Before merging: run on DST
+
+The latest changes were tested offline only, against the fake database in
+`tests/testthat/helper-fake-psd.R`. `DSTdb` and `ROracle` were not available.
+On DST with access to `DB_PSD`:
+
+1. Run `devtools::test(filter = "convert_person_id")`.
+2. Source `dev/dst-verification.R` (set `other_user`, `proxy_database` and
+   `proxy_schema` at the top first). It runs the checks below and the
+   "verify" items further down with dummy ids, cleans up, and prints a
+   summary. Paste it here and act on it.
+
+Checklist:
+
+- [ ] **Run table** `PSDMYTEMP_<yymmddHHMMSS>_<pid>`: the PL/SQL snapshot
+  changed in the `insert into` line only. Check that the procedure runs and
+  the run id is read back. Check that `user_objects` can be queried for the
+  cleanup of run tables older than a day.
+- [ ] **Registry time as text:** `BEF_HISTORISK_*` without `registry_time`.
+  The message should show the same time as `min(time_stamp)` in
+  `D101200.bef_leverance_time`, and the output should match a run with that
+  time given explicitly.
+- [ ] **`in_data = "ORACLE"` in DB_PSD** (`CREATE TABLE BEF_ID_PROC AS SELECT
+  DISTINCT ...`): covered by the new DB test with a table in your own schema.
+  Also try a table in another schema you can read.
+- [ ] **`out_data = "ORACLE"` in DB_PSD** (`ALTER TABLE ... RENAME TO`):
+  covered by the new DB test. Check that the kept table is in your schema.
+- [ ] **Other databases:** one manual run with
+  `in_database`/`out_database = "STATPROD"` and a project `proxy`, as in
+  the `BEF_IDSKIFT` example in `?convert_person_id`. Check that
+  `DSTdb::get_conn(db, namespace = "bef_personnummer", proxy = "[D...]")`
+  gives a connection as the proxy user and does not reuse a cached
+  non-proxy connection. Check also that `dbWriteTable(append = TRUE)` and
+  `dbFetch(n =)` work in chunks with ROracle.
+
 ## Done
 
 - [x] **Character arguments:** `arg_as_string()` replaces the
@@ -21,10 +56,8 @@ real `DB_PSD` before merging.
   `in_data`/`out_data` are upper-cased. The owner check uses the Oracle
   `USER`, not the Windows `USERNAME`.
 - [x] **`column_name` as input:** the column is renamed to `PNR`/`PERSON_ID`
-  in R before upload. The Oracle procedures still take no column name.
-- [x] **`in_table_name` only from R:** must be a data frame.
-  `in_data`/`out_data = "ORACLE"` now fail at once with "not implemented".
-  Before, `out_data = "ORACLE"` ran the conversion and returned `NULL`.
+  in R before upload, or aliased in the `SELECT` for Oracle input. The
+  Oracle procedures still take no column name.
 - [x] **Milliseconds:** kept when given (`"235959.999"` → `23:59:59.999`).
   Before, they were dropped silently. Values without milliseconds produce
   exactly the same PL/SQL as before.
@@ -34,84 +67,75 @@ real `DB_PSD` before merging.
 - [x] **Robustness:** all input is validated before connecting. Work tables
   are dropped on every exit. Fixed the leaked second connection and run ids in
   scientific notation (`HIS_ID3e+06`). Values in the PL/SQL are quoted.
+- [x] **1. `out_data = "ORACLE"`:** both options, chosen by `out_database`.
+  `DB_PSD` → the output table is renamed and kept (option A). Other
+  databases → copied in chunks with `dbFetch()`/`dbWriteTable(append =)`
+  (option B), and a partly written table is dropped on error.
+  `out_table_name` is validated as an Oracle name. The target must not exist,
+  and CREATE TABLE is checked on it (`session_privs`), all before upload.
+- [x] **2. `in_data = "ORACLE"`:** `in_table_name = "SCHEMA.TABLE"` (or
+  `"TABLE"` for your own schema), new `in_database`, `out_database` and
+  `proxy`. `database` is deprecated with a message and is the default for
+  both. In `DB_PSD`: `CREATE TABLE BEF_ID_PROC AS SELECT DISTINCT`. Other
+  databases: `SELECT DISTINCT` into R, then upload. Plain SQL is used rather
+  than `dbplyr::in_schema()`, so `dbplyr` is not needed. Existence, read access
+  and the id column are checked in `all_tab_columns` first.
+- [x] **4. Numeric PNR warning** (R input, and `NUMBER` columns in Oracle
+  input). Not converted automatically, because that would change the type
+  uploaded to `BEF_ID_PROC`.
+- [x] **5a. Unique run table** `PSDMYTEMP_<yymmddHHMMSS>_<pid>` (≤ 30
+  characters). The legacy `PSDMYTEMP` is no longer touched. Run tables older
+  than one day are dropped as leftovers.
+- [x] **Registry-time lookup** fetched as text (`TO_CHAR(... 'FF6')`),
+  trailing zeros trimmed, so the common case gives the same PL/SQL string as
+  before.
+- [x] **`add_person_id(drop_pnr = TRUE)`**: announced in NEWS as breaking.
+- [x] **Vignette** `vignettes/convert-person-id.Rmd`: one example per
+  procedure family, and when to use validity vs. registry time.
+- [x] **Privilege checks on source/target** (open question for items 1–2):
+  read access to the source via `all_tab_columns`, CREATE TABLE on the target.
 
-## Next steps (planned)
-
-### 1. `out_data = "ORACLE"`
-Decide first: keep the result on `DB_PSD`, or write it to another database?
-- **Option A (cheap, like the SAS macro):** keep the output table in the ident
-  schema on `DB_PSD`, i.e. `ALTER TABLE <prefix><run id> RENAME TO
-  <out_table_name>`, and do not drop it. Return the name invisibly.
-- **Option B (other database):** read the output into R and write it with
-  `DBI::dbWriteTable()` on a connection to the target database. Use chunks for
-  large tables.
-- Both options need: `out_table_name` validated as an Oracle identifier
-  (`^[A-Z][A-Z0-9_$#]{0,127}$`), an error if the table already exists
-  (`table_exists()`), and a CREATE TABLE check on the target
-  (`session_privs`). The old `user_sys_privs` check for this was removed
-  together with the unused second connection.
-- Tests: extend `local_fake_psd()`, then one manual run on DST.
-
-### 2. `in_data = "ORACLE"` and other databases
-- Interface: `in_table_name = "SCHEMA.TABLE"`, plus `database` and an
-  optional proxy schema (`DSTdb::get_conn(database, proxy = "[D222401]")`,
-  see `dev/old-code/bef_idskift_eksempel.R`). Consider splitting `database`
-  into `in_database`/`out_database`. Keep `database` working for a while with a
-  deprecation message.
-- If the table is in `DB_PSD`: try
-  `CREATE TABLE BEF_ID_PROC AS SELECT DISTINCT <id> FROM schema.table`, which
-  needs the user to be able to read the table. **Verify** whether
-  `p_ind_tabelnavn` accepts a schema-qualified name. If it does, nothing needs
-  copying.
-- Other databases: read with `dplyr::tbl(in_schema()) |> distinct() |>
-  collect()` and upload. Check the table exists and is readable
-  (`all_tables` / `all_tab_privs`) before starting.
+## Next steps (need DST or the PSD team)
 
 ### 3. Upload only the distinct id column (needs a DB check)
-At the moment the whole input data frame is uploaded to `DB_PSD`, as before.
+R input: the whole data frame is still uploaded to `DB_PSD`, as before.
+Oracle input already uses only the distinct ids.
 **Verify on DST** whether the procedure output contains columns from the input
 other than the id:
 - If it does not: upload `dplyr::distinct(input, <id>)` only. That is faster
   and sends less data. `add_person_id()` already does this.
-- If it does: keep the current behaviour and document it.
+- If it does: keep the current behaviour and document that Oracle input
+  gives only the id columns.
 
-### 4. Id column type and length
-- Numeric PNRs lose their leading zero (day 01–09), and Oracle will not
-  match them. Warn when `PNR` is numeric, and offer zero-padding
-  (`sprintf("%010.0f", x)`) or validation with `looks_like_cpr()`.
+### 4b. Id column type
 - After upload, `user_tab_columns` for `BEF_ID_PROC` could check the Oracle
-  type. Ask the PSD team which types the procedures expect.
+  type. Ask the PSD team which types the procedures expect. Then decide
+  whether to zero-pad numeric PNRs automatically.
 
-### 5. Concurrent runs
-The fixed names `BEF_ID_PROC` and `PSDMYTEMP` mean two simultaneous runs by
-the same user clobber each other. This also affects a SAS job that uses the
-same names, if there is one.
-- `PSDMYTEMP` is only used inside our own PL/SQL, so it can get a unique name
-  now. Better still, drop it and read `v_resultat`/`v_koerselsid` as OUT binds
-  via `ROracle::oracleProc()`.
+### 5b. Concurrent runs
+`BEF_ID_PROC` is still a fixed name, so two simultaneous runs by the same user
+clobber each other. The run table is unique now.
 - A unique input table (`BEF_ID_PROC_<random>`) needs verification that the
   procedures accept any `p_ind_tabelnavn`. `bef_idskift_eksempel.R` suggests
-  they do.
+  they do. Also verify whether `p_ind_tabelnavn` accepts a schema-qualified
+  name; if it does, Oracle input in `DB_PSD` needs no copy at all.
+- Better still for the run table: drop it and read `v_resultat`/`v_koerselsid`
+  as OUT binds via `ROracle::oracleProc()`. Needs a test on DST.
 
 ### 6. Smaller items
 - **`DROP TABLE ... PURGE`** for work tables, so CPR data does not stay in
-  the recycle bin. Check with the PSD team first.
-- **Registry-time lookup:** fetch `min(time_stamp)` as text
-  (`TO_CHAR(CAST(... AS TIMESTAMP), 'YYYY-MM-DD HH24:MI:SS.FF6')`). This
-  avoids the ROracle time-zone round trip through `POSIXct`. Today the
-  `POSIXct` value is pasted back as before.
+  the recycle bin. Check with the PSD team first. Also applies to a target
+  table dropped after a failed copy.
 - **`p_bruger` / `recipient`:** **verify** in which schema the output table is
   created when `recipient` is not the user. `bef_idskift_eksempel.R` reads it
   from the `p_bruger` schema. If so, look for the table there and use a
-  qualified name.
+  qualified name. This also affects `out_data = "ORACLE"` in `DB_PSD` (the
+  rename assumes your own schema).
 - **`BEF_IDSKIFT` output:** inspect the columns on DST. The legacy script
   keeps only `GL_PERSON_ID`, `NY_PERSON_ID`. Leave `select *` unless internal
   columns turn up.
 - **Testing on ids with shifts:** add a DB test with known shifted
   `PERSON_ID`s (ask K22 for a test set).
-- **Pseudonymisation in `add_person_id()`:** the SAS macro drops `PNR` after
-  conversion (`drop pnr; /* meget vigtigt */`). Add `drop_pnr = TRUE`. This
-  is a behaviour change for existing callers, so announce it in NEWS.
 
 ## Open questions (need input from users / the PSD team)
 
@@ -120,12 +144,11 @@ same names, if there is one.
   `"02012021"` is read as `dmy` (2 January).
 - Does anyone match on milliseconds? They are now kept, but nobody has
   confirmed this matters.
-- How do users know when to use `validity_date` + `registry_time` and when
-  `registry_start_time` + `registry_end_time`? The Details table in
-  `?convert_person_id` now lists the combinations. A short vignette with one
-  example per procedure family would help.
+- Is the vignette's explanation of validity vs. registry time right, and
+  does it match how K22 explains it? Have someone from K22 read it.
 - What happens when a user has access to PSD but not to the underlying
   conversion tables? Presumably the procedure reports this in `v_resultat`,
   which is now part of the error message. Confirm on DST.
-- Should privilege checks also cover the database or schema the data comes
-  from or goes to? Relevant for items 1–2.
+- Should `out_data = "ORACLE"` in `DB_PSD` be allowed for procedures that
+  return PNRs? The table with CPR numbers then stays in the user's schema
+  until they drop it.
