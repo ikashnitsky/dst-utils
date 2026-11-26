@@ -15,7 +15,7 @@
           p_koerselsid    => v_koerselsid
         );
         -- Store the OUT values so R can find the output table
-        insert into psdmytemp values (v_resultat, v_koerselsid);
+        insert into PSDMYTEMP_261126120000_4242 values (v_resultat, v_koerselsid);
         COMMIT;
       END;
     Code
@@ -34,7 +34,7 @@
           p_koerselsid     => v_koerselsid
         );
         -- Store the OUT values so R can find the output table
-        insert into psdmytemp values (v_resultat, v_koerselsid);
+        insert into PSDMYTEMP_261126120000_4242 values (v_resultat, v_koerselsid);
         COMMIT;
       END;
     Code
@@ -54,7 +54,7 @@
           p_koerselsid     => v_koerselsid
         );
         -- Store the OUT values so R can find the output table
-        insert into psdmytemp values (v_resultat, v_koerselsid);
+        insert into PSDMYTEMP_261126120000_4242 values (v_resultat, v_koerselsid);
         COMMIT;
       END;
     Code
@@ -75,7 +75,7 @@
           p_koerselsid       => v_koerselsid
         );
         -- Store the OUT values so R can find the output table
-        insert into psdmytemp values (v_resultat, v_koerselsid);
+        insert into PSDMYTEMP_261126120000_4242 values (v_resultat, v_koerselsid);
         COMMIT;
       END;
     Code
@@ -92,7 +92,7 @@
           p_koerselsid    => v_koerselsid
         );
         -- Store the OUT values so R can find the output table
-        insert into psdmytemp values (v_resultat, v_koerselsid);
+        insert into PSDMYTEMP_261126120000_4242 values (v_resultat, v_koerselsid);
         COMMIT;
       END;
     Code
@@ -111,7 +111,7 @@
           p_koerselsid       => v_koerselsid
         );
         -- Store the OUT values so R can find the output table
-        insert into psdmytemp values (v_resultat, v_koerselsid);
+        insert into PSDMYTEMP_261126120000_4242 values (v_resultat, v_koerselsid);
         COMMIT;
       END;
     Code
@@ -129,7 +129,7 @@
           p_koerselsid    => v_koerselsid
         );
         -- Store the OUT values so R can find the output table
-        insert into psdmytemp values (v_resultat, v_koerselsid);
+        insert into PSDMYTEMP_261126120000_4242 values (v_resultat, v_koerselsid);
         COMMIT;
       END;
 

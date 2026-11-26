@@ -36,11 +36,13 @@ devtools::install_local("path/to/DSTutils")
 
 - **`convert_person_id()`**: A versatile wrapper for executing Oracle
   procedures (e.g., `BEF_OMKOD`, `BEF_HISTORISK_ID`) to convert IDs. It
-  handles the creation of temporary tables, running the Oracle process,
-  and returning the converted output directly to R.
+  handles the temporary tables and the Oracle run. Input and output can
+  be R data frames or Oracle tables, also in other databases. See
+  `vignette("convert-person-id")`.
 - **`add_person_id()`**: A convenience function specifically built to
   process a data frame containing a `PNR` column, returning the data
   frame with a new `PERSON_ID` column appended via a database join.
+  `PNR` is dropped unless `drop_pnr = FALSE`.
 
 ## Usage
 

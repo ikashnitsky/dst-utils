@@ -17,35 +17,39 @@ convert_person_id(
   validity_date = NULL,
   registry_time = NULL,
   registry_start_time = NULL,
-  registry_end_time = NULL
+  registry_end_time = NULL,
+  in_database = NULL,
+  out_database = NULL,
+  proxy = NULL
 )
 }
 \arguments{
 \item{procedure}{Name of the Oracle procedure, e.g. \code{"BEF_HISTORISK_ID"}
 (case-insensitive). See Details.}
 
-\item{database}{Reserved for reading/writing data in other databases once
-\code{in_data}/\code{out_data = "ORACLE"} is implemented. The procedures always run
-in \code{DB_PSD}.}
+\item{database}{Deprecated. Use \code{in_database} and \code{out_database}. If given,
+it is the default for both.}
 
-\item{in_data}{Where the input data is: \code{"R"}. \code{"ORACLE"} is not
-implemented yet.}
+\item{in_data}{Where the input data is: \code{"R"} (a data frame) or
+\code{"ORACLE"} (a table in \code{in_database}). See Details.}
 
-\item{out_data}{Where the output should go: \code{"R"} (returned). \code{"ORACLE"} is
-not implemented yet.}
+\item{out_data}{Where the output should go: \code{"R"} (returned) or \code{"ORACLE"}
+(saved as \code{out_table_name} in \code{out_database}). See Details.}
 
-\item{column_name}{Optional name of the id column in \code{in_table_name}, if it
-is not already called \code{PNR}/\code{PERSON_ID} as the procedure requires. It is
+\item{column_name}{Optional name of the id column in the input, if it is
+not already called \code{PNR}/\code{PERSON_ID} as the procedure requires. It is
 renamed before upload.}
 
 \item{recipient}{User ident passed to the procedure (\code{p_bruger}). Defaults
 to the Windows user name. \code{NULL} sends an empty value.}
 
-\item{in_table_name}{A data frame with the id column the procedure needs
-(\code{PNR} or \code{PERSON_ID}, any case). Not used by \code{BEF_INVALIDE}.}
+\item{in_table_name}{The input: a data frame with the id column the
+procedure needs (\code{PNR} or \code{PERSON_ID}, any case) when \code{in_data = "R"}, or
+a table name such as \code{"D222401.MY_TABLE"} when \code{in_data = "ORACLE"}. Not
+used by \code{BEF_INVALIDE}.}
 
-\item{out_table_name}{Name of the output table when \code{out_data = "ORACLE"}
-(not implemented yet). Ignored otherwise.}
+\item{out_table_name}{Name of the table to create when
+\code{out_data = "ORACLE"}. Ignored otherwise.}
 
 \item{project_id}{Project that runs the conversion (\code{p_projektnummer}),
 e.g. \code{"D101200"}. Only used for logging on the Oracle side. Defaults to the
@@ -60,14 +64,25 @@ between \code{RFRA} and \code{RTIL}. Requires \code{validity_date}.}
 \item{registry_start_time, registry_end_time}{Registry interval, both or
 neither: returns rows where \code{RTIL > registry_start_time} and
 \code{RFRA <= registry_end_time}, e.g. \code{"01011900 00:00:00"}.}
+
+\item{in_database, out_database}{Database the input table is read from and
+the output table is written to, when \code{in_data}/\code{out_data = "ORACLE"}.
+Default \code{"DB_PSD"}. The procedures themselves always run in \code{DB_PSD}.}
+
+\item{proxy}{Optional proxy schema for connecting to \code{in_database} and
+\code{out_database} when they are not \code{DB_PSD}, e.g. \code{"D222401"} or
+\code{"[D222401]"} (see \code{DSTdb::get_conn()}). \code{DB_PSD} is always used with your
+own ident.}
 }
 \value{
-A data frame: the output table of the procedure.
+With \code{out_data = "R"}, a data frame: the output table of the
+procedure. With \code{out_data = "ORACLE"}, the name of the created table,
+invisibly.
 }
 \description{
 Runs one of the BEF conversion procedures in \code{DB_PSD}
-(Oracle) on a data frame of \code{PNR}s or \code{PERSON_ID}s and returns the
-procedure's output table.
+(Oracle) on a set of \code{PNR}s or \code{PERSON_ID}s and returns the procedure's
+output table, or saves it as an Oracle table.
 }
 \details{
 \strong{Procedures and their input column}\tabular{lll}{
@@ -89,7 +104,37 @@ procedures, a missing \code{registry_time} is looked up in
 \code{validity_date}).
 
 \strong{Ids that cannot be found} come back as \code{PNR = "Ukendt-PNR"} or
-\code{PERSON_ID = 999999999999999} (15 nines).
+\code{PERSON_ID = 999999999999999} (15 nines). A \code{PNR} stored as a number has
+lost the leading zero of days 01-09 and will not be found, so a numeric
+\code{PNR} column gives a warning. Convert it first, e.g.
+\code{sprintf("\%010.0f", PNR)}.
+
+\strong{Where the input comes from} (\code{in_data})
+\itemize{
+\item \code{"R"}: \code{in_table_name} is a data frame. It is uploaded as it is.
+\item \code{"ORACLE"}: \code{in_table_name} is a table name, \code{"SCHEMA.TABLE"} or
+\code{"TABLE"} (your own schema), in \code{in_database}. Only the distinct values
+of the id column are used. In \code{DB_PSD} they are copied with
+\verb{CREATE TABLE ... AS SELECT}, so nothing passes through R. In other
+databases they are read into R and uploaded to \code{DB_PSD}. Either way, you
+need read access to the table.
+}
+
+\strong{Where the output goes} (\code{out_data})
+\itemize{
+\item \code{"R"}: the output table is returned as a data frame.
+\item \code{"ORACLE"} with \code{out_database = "DB_PSD"}: the procedure's output table
+is renamed to \code{out_table_name} and kept in your own schema in \code{DB_PSD}.
+Nothing passes through R. Drop it when you no longer need it.
+\item \code{"ORACLE"} with another \code{out_database}: the output is copied in chunks to
+a new table \code{out_table_name} in that database, in your schema or in the
+\code{proxy} schema. Chunk size is set with
+\code{options(DSTutils.chunk_size = )} (default 100 000 rows).
+}
+
+\code{out_table_name} must be a plain Oracle name (letters, digits, \verb{_}, \code{$},
+\verb{#}; starting with a letter) and must not exist yet. You need CREATE TABLE
+on the target. All these checks are made before anything is uploaded.
 
 \strong{Dates and times} are parsed with \code{\link[lubridate:parse_date_time]{lubridate::parse_date_time()}} using the
 orders \verb{ymd HMS}, \verb{dmy HMS}, \verb{mdy HMS}, \verb{ymd HM}, \verb{dmy HM}, \verb{mdy HM}, \code{ymd},
@@ -98,17 +143,20 @@ works for plain dates (\code{31122021}). Anything with a time must be a string,
 e.g. \code{"31-12-2021 12:00:00"}. Milliseconds are kept
 (\code{"31129999 235959.999"}).
 
-\strong{Character arguments} (\code{procedure}, \code{database}, \code{in_data}, \code{out_data},
-\code{recipient}, \code{out_table_name}, \code{project_id}) can be quoted
-(\code{procedure = "BEF_OMKOD"}), a bare word (\code{procedure = BEF_OMKOD}) or a
-variable holding a string (\code{procedure = my_proc}).
+\strong{Character arguments} (\code{procedure}, \code{in_data}, \code{out_data}, \code{recipient},
+\code{out_table_name}, \code{project_id}, \code{in_database}, \code{out_database}, \code{proxy}) can
+be quoted (\code{procedure = "BEF_OMKOD"}), a bare word
+(\code{procedure = BEF_OMKOD}) or a variable holding a string
+(\code{procedure = my_proc}).
 
 \strong{Side effects in DB_PSD.} The function writes the input to \code{BEF_ID_PROC}
-and the run id to \code{PSDMYTEMP} in your own schema, and the procedure writes
-its output table there too. All three are dropped when the function exits,
-also on error. If an earlier, interrupted run left \code{BEF_ID_PROC} or
-\code{PSDMYTEMP} behind, they are dropped first. Do not run two conversions at
-the same time under the same user, because they share these table names.
+and the run id to \verb{PSDMYTEMP_<time>_<process id>} in your own schema, and
+the procedure writes its output table there too. All three are dropped when
+the function exits, also on error, except the output table when it is kept
+with \code{out_data = "ORACLE"}. If an earlier, interrupted run left
+\code{BEF_ID_PROC} behind, it is dropped first, and so are run tables older than
+one day. Do not run two conversions at the same time under the same user,
+because they share \code{BEF_ID_PROC}.
 }
 \examples{
 \dontrun{
@@ -134,6 +182,20 @@ convert_person_id(
   in_table_name = pid,
   registry_start_time = "01011900 00:00:00",
   registry_end_time = "31122100 23:59:59"
+)
+
+# PERSON_ID shifts for a table in a project schema on STATPROD, written
+# back to the same schema
+convert_person_id(
+  procedure = "BEF_IDSKIFT",
+  in_data = "ORACLE",
+  in_table_name = "D222401.PERSON_ID_TABEL",
+  in_database = "STATPROD",
+  out_data = "ORACLE",
+  out_table_name = "IDSKIFT_2024",
+  out_database = "STATPROD",
+  proxy = "D222401",
+  project_id = "D222401"
 )
 }
 }

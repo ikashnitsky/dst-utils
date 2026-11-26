@@ -45,3 +45,6 @@ extract_date_time <- function(datetime) {
 
   return(list(date = date_part, time = time_part))
 }
+
+# Base R has `%||%` only from 4.4.0
+`%||%` <- function(x, y) if (is.null(x)) y else x

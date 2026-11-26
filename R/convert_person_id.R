@@ -13,7 +13,8 @@
 #   p_registersluttid, p_resultat, p_koerselsid;
 # * the package names, the output-table prefixes and the date-argument
 #   combinations each procedure accepts (`bef_procedures` below);
-# * the work tables BEF_ID_PROC (input) and PSDMYTEMP (run id).
+# * the input work table BEF_ID_PROC (p_ind_tabelnavn).
+# The run table PSDMYTEMP_<time>_<pid> is only used by our own PL/SQL block.
 # The generated PL/SQL is snapshot-tested in
 # tests/testthat/_snaps/convert_person_id.md, so any change to it shows up in
 # review.
@@ -82,8 +83,8 @@ bef_procedures <- list(
 #' @title Convert between CPR and PERSON_ID
 #'
 #' @description Runs one of the BEF conversion procedures in `DB_PSD`
-#'   (Oracle) on a data frame of `PNR`s or `PERSON_ID`s and returns the
-#'   procedure's output table.
+#'   (Oracle) on a set of `PNR`s or `PERSON_ID`s and returns the procedure's
+#'   output table, or saves it as an Oracle table.
 #'
 #' @details
 #' **Procedures and their input column**
@@ -105,7 +106,35 @@ bef_procedures <- list(
 #' `validity_date`).
 #'
 #' **Ids that cannot be found** come back as `PNR = "Ukendt-PNR"` or
-#' `PERSON_ID = 999999999999999` (15 nines).
+#' `PERSON_ID = 999999999999999` (15 nines). A `PNR` stored as a number has
+#' lost the leading zero of days 01-09 and will not be found, so a numeric
+#' `PNR` column gives a warning. Convert it first, e.g.
+#' `sprintf("%010.0f", PNR)`.
+#'
+#' **Where the input comes from** (`in_data`)
+#'
+#' * `"R"`: `in_table_name` is a data frame. It is uploaded as it is.
+#' * `"ORACLE"`: `in_table_name` is a table name, `"SCHEMA.TABLE"` or
+#'   `"TABLE"` (your own schema), in `in_database`. Only the distinct values
+#'   of the id column are used. In `DB_PSD` they are copied with
+#'   `CREATE TABLE ... AS SELECT`, so nothing passes through R. In other
+#'   databases they are read into R and uploaded to `DB_PSD`. Either way, you
+#'   need read access to the table.
+#'
+#' **Where the output goes** (`out_data`)
+#'
+#' * `"R"`: the output table is returned as a data frame.
+#' * `"ORACLE"` with `out_database = "DB_PSD"`: the procedure's output table
+#'   is renamed to `out_table_name` and kept in your own schema in `DB_PSD`.
+#'   Nothing passes through R. Drop it when you no longer need it.
+#' * `"ORACLE"` with another `out_database`: the output is copied in chunks to
+#'   a new table `out_table_name` in that database, in your schema or in the
+#'   `proxy` schema. Chunk size is set with
+#'   `options(DSTutils.chunk_size = )` (default 100 000 rows).
+#'
+#' `out_table_name` must be a plain Oracle name (letters, digits, `_`, `$`,
+#' `#`; starting with a letter) and must not exist yet. You need CREATE TABLE
+#' on the target. All these checks are made before anything is uploaded.
 #'
 #' **Dates and times** are parsed with [lubridate::parse_date_time()] using the
 #' orders `ymd HMS`, `dmy HMS`, `mdy HMS`, `ymd HM`, `dmy HM`, `mdy HM`, `ymd`,
@@ -114,36 +143,40 @@ bef_procedures <- list(
 #' e.g. `"31-12-2021 12:00:00"`. Milliseconds are kept
 #' (`"31129999 235959.999"`).
 #'
-#' **Character arguments** (`procedure`, `database`, `in_data`, `out_data`,
-#' `recipient`, `out_table_name`, `project_id`) can be quoted
-#' (`procedure = "BEF_OMKOD"`), a bare word (`procedure = BEF_OMKOD`) or a
-#' variable holding a string (`procedure = my_proc`).
+#' **Character arguments** (`procedure`, `in_data`, `out_data`, `recipient`,
+#' `out_table_name`, `project_id`, `in_database`, `out_database`, `proxy`) can
+#' be quoted (`procedure = "BEF_OMKOD"`), a bare word
+#' (`procedure = BEF_OMKOD`) or a variable holding a string
+#' (`procedure = my_proc`).
 #'
 #' **Side effects in DB_PSD.** The function writes the input to `BEF_ID_PROC`
-#' and the run id to `PSDMYTEMP` in your own schema, and the procedure writes
-#' its output table there too. All three are dropped when the function exits,
-#' also on error. If an earlier, interrupted run left `BEF_ID_PROC` or
-#' `PSDMYTEMP` behind, they are dropped first. Do not run two conversions at
-#' the same time under the same user, because they share these table names.
+#' and the run id to `PSDMYTEMP_<time>_<process id>` in your own schema, and
+#' the procedure writes its output table there too. All three are dropped when
+#' the function exits, also on error, except the output table when it is kept
+#' with `out_data = "ORACLE"`. If an earlier, interrupted run left
+#' `BEF_ID_PROC` behind, it is dropped first, and so are run tables older than
+#' one day. Do not run two conversions at the same time under the same user,
+#' because they share `BEF_ID_PROC`.
 #'
 #' @param procedure Name of the Oracle procedure, e.g. `"BEF_HISTORISK_ID"`
 #'   (case-insensitive). See Details.
-#' @param database Reserved for reading/writing data in other databases once
-#'   `in_data`/`out_data = "ORACLE"` is implemented. The procedures always run
-#'   in `DB_PSD`.
-#' @param in_data Where the input data is: `"R"`. `"ORACLE"` is not
-#'   implemented yet.
-#' @param out_data Where the output should go: `"R"` (returned). `"ORACLE"` is
-#'   not implemented yet.
-#' @param column_name Optional name of the id column in `in_table_name`, if it
-#'   is not already called `PNR`/`PERSON_ID` as the procedure requires. It is
+#' @param database Deprecated. Use `in_database` and `out_database`. If given,
+#'   it is the default for both.
+#' @param in_data Where the input data is: `"R"` (a data frame) or
+#'   `"ORACLE"` (a table in `in_database`). See Details.
+#' @param out_data Where the output should go: `"R"` (returned) or `"ORACLE"`
+#'   (saved as `out_table_name` in `out_database`). See Details.
+#' @param column_name Optional name of the id column in the input, if it is
+#'   not already called `PNR`/`PERSON_ID` as the procedure requires. It is
 #'   renamed before upload.
 #' @param recipient User ident passed to the procedure (`p_bruger`). Defaults
 #'   to the Windows user name. `NULL` sends an empty value.
-#' @param in_table_name A data frame with the id column the procedure needs
-#'   (`PNR` or `PERSON_ID`, any case). Not used by `BEF_INVALIDE`.
-#' @param out_table_name Name of the output table when `out_data = "ORACLE"`
-#'   (not implemented yet). Ignored otherwise.
+#' @param in_table_name The input: a data frame with the id column the
+#'   procedure needs (`PNR` or `PERSON_ID`, any case) when `in_data = "R"`, or
+#'   a table name such as `"D222401.MY_TABLE"` when `in_data = "ORACLE"`. Not
+#'   used by `BEF_INVALIDE`.
+#' @param out_table_name Name of the table to create when
+#'   `out_data = "ORACLE"`. Ignored otherwise.
 #' @param project_id Project that runs the conversion (`p_projektnummer`),
 #'   e.g. `"D101200"`. Only used for logging on the Oracle side. Defaults to the
 #'   user ident.
@@ -154,8 +187,17 @@ bef_procedures <- list(
 #' @param registry_start_time,registry_end_time Registry interval, both or
 #'   neither: returns rows where `RTIL > registry_start_time` and
 #'   `RFRA <= registry_end_time`, e.g. `"01011900 00:00:00"`.
+#' @param in_database,out_database Database the input table is read from and
+#'   the output table is written to, when `in_data`/`out_data = "ORACLE"`.
+#'   Default `"DB_PSD"`. The procedures themselves always run in `DB_PSD`.
+#' @param proxy Optional proxy schema for connecting to `in_database` and
+#'   `out_database` when they are not `DB_PSD`, e.g. `"D222401"` or
+#'   `"[D222401]"` (see `DSTdb::get_conn()`). `DB_PSD` is always used with your
+#'   own ident.
 #'
-#' @return A data frame: the output table of the procedure.
+#' @return With `out_data = "R"`, a data frame: the output table of the
+#'   procedure. With `out_data = "ORACLE"`, the name of the created table,
+#'   invisibly.
 #'
 #' @seealso [add_person_id()] for the common PNR -> PERSON_ID case.
 #'
@@ -184,6 +226,20 @@ bef_procedures <- list(
 #'   registry_start_time = "01011900 00:00:00",
 #'   registry_end_time = "31122100 23:59:59"
 #' )
+#'
+#' # PERSON_ID shifts for a table in a project schema on STATPROD, written
+#' # back to the same schema
+#' convert_person_id(
+#'   procedure = "BEF_IDSKIFT",
+#'   in_data = "ORACLE",
+#'   in_table_name = "D222401.PERSON_ID_TABEL",
+#'   in_database = "STATPROD",
+#'   out_data = "ORACLE",
+#'   out_table_name = "IDSKIFT_2024",
+#'   out_database = "STATPROD",
+#'   proxy = "D222401",
+#'   project_id = "D222401"
+#' )
 #' }
 #' @export
 convert_person_id <- function(
@@ -199,11 +255,15 @@ convert_person_id <- function(
   validity_date = NULL,
   registry_time = NULL,
   registry_start_time = NULL,
-  registry_end_time = NULL
+  registry_end_time = NULL,
+  in_database = NULL,
+  out_database = NULL,
+  proxy = NULL
 ) {
   # READ CHARACTER ARGUMENTS ####
   # Quoted, bare word, or a variable holding a string
   caller <- parent.frame()
+  database_given <- !missing(database)
   procedure <- arg_as_string(substitute(procedure), caller, "procedure")
   database <- arg_as_string(substitute(database), caller, "database")
   in_data <- arg_as_string(substitute(in_data), caller, "in_data")
@@ -217,6 +277,9 @@ convert_person_id <- function(
     "out_table_name"
   )
   project_id <- arg_as_string(substitute(project_id), caller, "project_id")
+  in_database <- arg_as_string(substitute(in_database), caller, "in_database")
+  out_database <- arg_as_string(substitute(out_database), caller, "out_database")
+  proxy <- arg_as_string(substitute(proxy), caller, "proxy")
 
   # VALIDATE INPUT (before touching the database) ####
   spec <- bef_procedure(procedure)
@@ -224,39 +287,44 @@ convert_person_id <- function(
 
   in_data <- check_location(in_data, "in_data")
   out_data <- check_location(out_data, "out_data")
-  if (in_data == "ORACLE") {
-    stop(
-      "in_data = 'ORACLE' is not implemented yet. ",
-      "Read the table into R and pass it as a data frame (in_table_name=).",
-      call. = FALSE
-    )
-  }
-  if (out_data == "ORACLE") {
-    stop(
-      "out_data = 'ORACLE' is not implemented yet. ",
-      "Use out_data = 'R' and write the returned data frame yourself.",
-      call. = FALSE
-    )
-  }
-  if (!is.null(out_table_name)) {
+
+  if (database_given) {
     message(
-      "NOTE: Variablen 'out_table_name' ignoreres, da output-tabellen returneres i R (out_data=R)."
+      "NOTE: 'database' is deprecated. Use in_database= and out_database=."
     )
+  }
+  in_database <- check_database(in_database %||% database, "in_database")
+  out_database <- check_database(out_database %||% database, "out_database")
+  if (!is.null(proxy)) {
+    proxy <- check_proxy(proxy)
   }
 
   input <- NULL
+  source <- NULL
   if (!is.na(spec$id_column)) {
     if (is.null(in_table_name)) {
       stop("Angiv navnet p\u00e5 input-tabellen (in_table_name=).", call. = FALSE)
     }
-    input <- prepare_input_table(
-      in_table_name,
-      spec$id_column,
-      column_name,
-      procedure
-    )
+    if (in_data == "R") {
+      input <- prepare_input_table(
+        in_table_name,
+        spec$id_column,
+        column_name,
+        procedure
+      )
+    } else {
+      source <- parse_source_table(in_table_name, column_name, spec$id_column)
+    }
   } else if (!is.null(in_table_name)) {
     message("NOTE: ", procedure, " takes no input table; 'in_table_name' is ignored.")
+  }
+
+  if (out_data == "ORACLE") {
+    out_table_name <- check_out_table_name(out_table_name)
+  } else if (!is.null(out_table_name)) {
+    message(
+      "NOTE: Variablen 'out_table_name' ignoreres, da output-tabellen returneres i R (out_data=R)."
+    )
   }
 
   date_mode <- resolve_date_mode(
@@ -290,21 +358,68 @@ convert_person_id <- function(
   created_tables <- character()
   on.exit(cleanup_psd(psd, created_tables, schema), add = TRUE)
 
-  schema <- psd_query(psd, "SELECT USER AS SCHEMA_NAME FROM DUAL")$SCHEMA_NAME
+  # Connections to other databases, opened once each when needed
+  other_conns <- list()
+  on.exit(disconnect_all(other_conns), add = TRUE)
+  conn_to <- function(database) {
+    if (database == "DB_PSD") {
+      return(psd)
+    }
+    if (is.null(other_conns[[database]])) {
+      other_conns[[database]] <<- connect_db(database, proxy)
+    }
+    other_conns[[database]]
+  }
+
+  schema <- db_user(psd)
   check_psd_privileges(psd, spec, user)
   drop_leftover_tables(psd, schema)
 
-  # UPLOAD INPUT AND RUN THE PROCEDURE ####
-  if (!is.null(input)) {
-    created_tables <- c(created_tables, "BEF_ID_PROC")
-    psd_write_table(psd, "BEF_ID_PROC", input)
+  # CHECK SOURCE AND TARGET BEFORE UPLOADING ANYTHING ####
+  if (!is.null(source)) {
+    in_conn <- conn_to(in_database)
+    check_source_table(in_conn, source, in_database)
+  }
+  if (out_data == "ORACLE") {
+    out_conn <- conn_to(out_database)
+    out_schema <- if (out_database == "DB_PSD") schema else db_user(out_conn)
+    if (out_database != "DB_PSD") {
+      check_create_privilege(out_conn, out_database, user)
+    }
+    if (table_exists(out_conn, out_table_name, out_schema)) {
+      stop(
+        "The table ",
+        out_schema,
+        ".",
+        out_table_name,
+        " already exists in ",
+        out_database,
+        ". Choose another out_table_name or drop the table first.",
+        call. = FALSE
+      )
+    }
   }
 
-  # PSDMYTEMP receives the procedure's OUT values (result text and run id)
-  created_tables <- c(created_tables, "PSDMYTEMP")
-  psd_execute(
+  # UPLOAD INPUT AND RUN THE PROCEDURE ####
+  if (!is.null(input) || !is.null(source)) {
+    created_tables <- c(created_tables, "BEF_ID_PROC")
+  }
+  if (!is.null(input)) {
+    db_write_table(psd, "BEF_ID_PROC", input)
+  } else if (!is.null(source)) {
+    copy_source_to_psd(psd, in_conn, source, in_database)
+  }
+
+  # The run table receives the procedure's OUT values (result text and run id)
+  run_table <- run_table_name()
+  created_tables <- c(created_tables, run_table)
+  db_execute(
     psd,
-    "create table PSDMYTEMP (v_resultat VARCHAR2(200), v_koerselsid NUMBER)"
+    paste0(
+      "create table ",
+      run_table,
+      " (v_resultat VARCHAR2(200), v_koerselsid NUMBER)"
+    )
   )
 
   if (date_mode == "historic" && is.null(dates$registry)) {
@@ -316,12 +431,13 @@ convert_person_id <- function(
     project_id = project_id,
     recipient = recipient,
     date_mode = date_mode,
-    dates = dates
+    dates = dates,
+    run_table = run_table
   )
   psd_run_plsql(psd, plsql)
 
   # COLLECT THE OUTPUT TABLE ####
-  run <- read_run_info(psd)
+  run <- read_run_info(psd, run_table)
   message(run$result)
 
   # The procedure saves its output as <prefix><run id> in the user's schema
@@ -337,7 +453,30 @@ convert_person_id <- function(
     )
   }
 
-  psd_query(psd, paste0("select * from ", out_name))
+  if (out_data == "R") {
+    return(db_query(psd, paste0("select * from ", out_name)))
+  }
+
+  if (out_database == "DB_PSD") {
+    # Keep the procedure's table under the requested name
+    db_execute(
+      psd,
+      paste0("alter table ", out_name, " rename to ", out_table_name)
+    )
+    created_tables <- setdiff(created_tables, out_name)
+  } else {
+    copy_output(psd, out_name, out_conn, out_table_name, out_schema, out_database)
+  }
+  message(
+    "Output saved as ",
+    out_schema,
+    ".",
+    out_table_name,
+    " in ",
+    out_database,
+    "."
+  )
+  invisible(out_table_name)
 }
 
 # Input handling (no database) ------------------------------------------------
@@ -407,6 +546,95 @@ check_location <- function(x, arg) {
   toupper(x)
 }
 
+# Work-table names that user tables must not collide with
+reserved_table_pattern <- "^(BEF_ID_PROC|PSDMYTEMP.*)$"
+
+#' Validate an unquoted Oracle identifier and return it in upper case
+#' @noRd
+check_identifier <- function(x, what) {
+  x <- toupper(x)
+  if (!grepl("^[A-Z][A-Z0-9_$#]{0,127}$", x)) {
+    stop(
+      what,
+      " '",
+      x,
+      "' is not a valid Oracle name: use letters, digits, _, $ and #, ",
+      "starting with a letter.",
+      call. = FALSE
+    )
+  }
+  x
+}
+
+#' Validate a database name (it is passed on to DSTdb::get_conn())
+#' @noRd
+check_database <- function(x, arg) {
+  if (is.null(x)) {
+    stop("'", arg, "' must be a database name.", call. = FALSE)
+  }
+  check_identifier(x, paste0("'", arg, "'"))
+}
+
+#' Validate a proxy schema; accepts `D222401` and `[D222401]`
+#' @noRd
+check_proxy <- function(x) {
+  name <- check_identifier(gsub("^\\[|\\]$", "", x), "'proxy'")
+  paste0("[", name, "]")
+}
+
+#' Validate `out_table_name` for out_data = "ORACLE"
+#' @noRd
+check_out_table_name <- function(x) {
+  if (is.null(x)) {
+    stop(
+      "Specify the name of the table to create (out_table_name=) when out_data = 'ORACLE'.",
+      call. = FALSE
+    )
+  }
+  x <- check_identifier(x, "out_table_name")
+  if (grepl(reserved_table_pattern, x)) {
+    stop("out_table_name ", x, " is used for a work table. Choose another name.", call. = FALSE)
+  }
+  x
+}
+
+#' Parse "SCHEMA.TABLE" or "TABLE" for in_data = "ORACLE"
+#'
+#' Returns the schema (NULL for the user's own), the table, the qualified name
+#' and the source column, which is uploaded as `id_column`.
+#' @noRd
+parse_source_table <- function(x, column_name, id_column) {
+  if (!is.character(x) || length(x) != 1 || is.na(x)) {
+    stop(
+      "With in_data = 'ORACLE', 'in_table_name' must be a table name such as \"D222401.MY_TABLE\".",
+      call. = FALSE
+    )
+  }
+  parts <- strsplit(x, ".", fixed = TRUE)[[1]]
+  if (length(parts) > 2) {
+    stop("in_table_name '", x, "' must be \"SCHEMA.TABLE\" or \"TABLE\".", call. = FALSE)
+  }
+  table <- check_identifier(parts[length(parts)], "in_table_name")
+  schema <- if (length(parts) == 2) check_identifier(parts[1], "The schema in in_table_name")
+  if (grepl(reserved_table_pattern, table)) {
+    stop(
+      "in_table_name ",
+      table,
+      " has the name of a work table, which is replaced during the run. ",
+      "Copy it to another name first.",
+      call. = FALSE
+    )
+  }
+  column <- check_identifier(column_name %||% id_column, "column_name")
+  list(
+    schema = schema,
+    table = table,
+    qualified = paste(c(schema, table), collapse = "."),
+    column = column,
+    id_column = id_column
+  )
+}
+
 #' Check the input data frame and give the id column the required name
 #' @noRd
 prepare_input_table <- function(data, id_column, column_name, procedure) {
@@ -415,7 +643,7 @@ prepare_input_table <- function(data, id_column, column_name, procedure) {
       "'in_table_name' must be a data frame with a ",
       id_column,
       " column. ",
-      "(Reading the input from an Oracle table, in_data = 'ORACLE', is not implemented yet.)",
+      "To read the input from an Oracle table, use in_data = 'ORACLE'.",
       call. = FALSE
     )
   }
@@ -471,7 +699,23 @@ prepare_input_table <- function(data, id_column, column_name, procedure) {
       call. = FALSE
     )
   }
+  warn_numeric_pnr(is.numeric(data[[id_column]]), id_column)
   data
+}
+
+#' Warn that numeric PNRs have lost their leading zero
+#' @noRd
+warn_numeric_pnr <- function(is_numeric, id_column, where = "") {
+  if (id_column == "PNR" && is_numeric) {
+    warning(
+      "PNR",
+      where,
+      " is numeric. PNRs with day 01-09 have lost their leading zero ",
+      "and will not be found. Convert them to 10-character strings first, ",
+      "e.g. sprintf(\"%010.0f\", PNR) in R or TO_CHAR(PNR, 'FM0000000000') in Oracle.",
+      call. = FALSE
+    )
+  }
 }
 
 #' Decide which date arguments are sent to the procedure
@@ -605,12 +849,22 @@ sql_timestamp <- function(x) {
   paste0("TO_TIMESTAMP(", sql_string(x), ", 'YYYY-MM-DD HH24:MI:SS.FF')")
 }
 
+#' Name of the table that receives the procedure's OUT values
+#'
+#' Unique per process and second, so concurrent runs (and a SAS job using the
+#' old fixed name PSDMYTEMP) do not share it. At most 28 characters, within
+#' the 30-character limit of older Oracle versions.
+#' @noRd
+run_table_name <- function(time = Sys.time(), pid = Sys.getpid()) {
+  paste0("PSDMYTEMP_", format(time, "%y%m%d%H%M%S"), "_", pid %% 100000)
+}
+
 #' Build the anonymous PL/SQL block that runs a BEF procedure
 #'
 #' The procedure creates its output table <prefix><run id> in the user's
-#' schema. Its OUT values are stored in PSDMYTEMP so R can find that table.
+#' schema. Its OUT values are stored in `run_table` so R can find that table.
 #' @noRd
-build_bef_plsql <- function(spec, project_id, recipient, date_mode, dates) {
+build_bef_plsql <- function(spec, project_id, recipient, date_mode, dates, run_table) {
   args <- c(
     p_projektnummer = sql_string(project_id),
     p_bruger = sql_string(recipient),
@@ -646,7 +900,9 @@ build_bef_plsql <- function(spec, project_id, recipient, date_mode, dates) {
     paste0("    ", arg_names, " => ", args, collapse = ",\n"),
     "\n  );\n",
     "  -- Store the OUT values so R can find the output table\n",
-    "  insert into psdmytemp values (v_resultat, v_koerselsid);\n",
+    "  insert into ",
+    run_table,
+    " values (v_resultat, v_koerselsid);\n",
     "  COMMIT;\n",
     "END;"
   )
@@ -665,26 +921,63 @@ psd_connect <- function() {
   DSTdb::get_conn('DB_PSD', namespace = "bef_personnummer")
 }
 
-psd_query <- function(conn, sql) {
+db_connect <- function(database, proxy = NULL) {
+  args <- list(database, namespace = "bef_personnummer")
+  if (!is.null(proxy)) {
+    args$proxy <- proxy
+  }
+  do.call(DSTdb::get_conn, args)
+}
+
+db_query <- function(conn, sql) {
   DBI::dbGetQuery(conn, sql)
 }
 
-psd_execute <- function(conn, sql) {
+db_execute <- function(conn, sql) {
   res <- DBI::dbSendQuery(conn, sql)
   DBI::dbClearResult(res)
   invisible(TRUE)
 }
 
-psd_write_table <- function(conn, name, data) {
-  DBI::dbWriteTable(conn, name, data)
+db_write_table <- function(conn, name, data, append = FALSE) {
+  DBI::dbWriteTable(conn, name, data, append = append)
+}
+
+#' Run a query and pass the result to `write_chunk()` in chunks
+#'
+#' `write_chunk(chunk, first)` is called at least once, so a zero-row result
+#' still creates the target table. Returns the number of rows.
+#' @noRd
+db_read_chunked <- function(conn, sql, chunk_size, write_chunk) {
+  res <- DBI::dbSendQuery(conn, sql)
+  on.exit(DBI::dbClearResult(res), add = TRUE)
+  n <- 0
+  repeat {
+    chunk <- DBI::dbFetch(res, n = chunk_size)
+    if (n > 0 && nrow(chunk) == 0) {
+      break
+    }
+    write_chunk(chunk, first = n == 0)
+    n <- n + nrow(chunk)
+    if (DBI::dbHasCompleted(res)) {
+      break
+    }
+  }
+  n
 }
 
 psd_run_plsql <- function(conn, plsql) {
   ROracle::oracleProc(conn, plsql)
 }
 
-psd_disconnect <- function(conn) {
+db_disconnect <- function(conn) {
   DBI::dbDisconnect(conn)
+}
+
+#' The Oracle user (schema) of a connection
+#' @noRd
+db_user <- function(conn) {
+  db_query(conn, "SELECT USER AS SCHEMA_NAME FROM DUAL")$SCHEMA_NAME
 }
 
 #' Connect to DB_PSD with a readable error if that is not possible
@@ -702,25 +995,62 @@ connect_psd <- function() {
   )
 }
 
-#' Check CREATE TABLE in DB_PSD and EXECUTE on the procedure's package
-#'
-#' `session_privs` and `all_tab_privs` include privileges granted through
-#' roles and to PUBLIC, which `user_sys_privs` / `user_tab_privs` miss.
+#' Connect to a database other than DB_PSD, optionally through a proxy schema
 #' @noRd
-check_psd_privileges <- function(conn, spec, user) {
-  create_rights <- psd_query(
+connect_db <- function(database, proxy = NULL) {
+  tryCatch(
+    db_connect(database, proxy),
+    error = function(e) {
+      stop(
+        "Could not connect to ",
+        database,
+        if (!is.null(proxy)) paste0(" with proxy ", proxy),
+        ".\n",
+        conditionMessage(e),
+        call. = FALSE
+      )
+    }
+  )
+}
+
+#' Close connections, ignoring errors (runs from on.exit())
+#' @noRd
+disconnect_all <- function(conns) {
+  for (conn in conns) {
+    tryCatch(db_disconnect(conn), error = function(e) invisible(NULL))
+  }
+}
+
+#' Check CREATE TABLE on a connection
+#'
+#' `session_privs` includes privileges granted through roles, which
+#' `user_sys_privs` misses.
+#' @noRd
+check_create_privilege <- function(conn, database, user) {
+  create_rights <- db_query(
     conn,
     "SELECT privilege FROM session_privs WHERE privilege = 'CREATE TABLE'"
   )
   if (nrow(create_rights) == 0) {
     stop(
       user,
-      " does not have privileges to create tables in DB_PSD.",
+      " does not have privileges to create tables in ",
+      database,
+      ".",
       call. = FALSE
     )
   }
+}
 
-  proc_rights <- psd_query(
+#' Check CREATE TABLE in DB_PSD and EXECUTE on the procedure's package
+#'
+#' `all_tab_privs` includes privileges granted through roles and to PUBLIC,
+#' which `user_tab_privs` misses.
+#' @noRd
+check_psd_privileges <- function(conn, spec, user) {
+  check_create_privilege(conn, "DB_PSD", user)
+
+  proc_rights <- db_query(
     conn,
     paste0(
       "SELECT privilege FROM all_tab_privs WHERE table_name = '",
@@ -738,35 +1068,185 @@ check_psd_privileges <- function(conn, spec, user) {
   }
 }
 
-#' Drop work tables left behind by an interrupted earlier run
+#' Check that the source table exists, is readable and has the id column
 #'
-#' Otherwise creating them fails, and a stale PSDMYTEMP row could point to the
-#' wrong output table.
+#' `all_tab_columns` lists the tables and views the user can read.
 #' @noRd
-drop_leftover_tables <- function(conn, schema) {
-  for (tbl in c("BEF_ID_PROC", "PSDMYTEMP")) {
-    if (table_exists(conn, tbl, schema)) {
-      message(
-        "NOTE: Dropping table ",
-        tbl,
-        " left in DB_PSD by an earlier, interrupted run."
-      )
-      psd_execute(conn, paste0("drop table ", tbl))
-    }
+check_source_table <- function(conn, source, database) {
+  owner <- if (is.null(source$schema)) "USER" else sql_string(source$schema)
+  cols <- db_query(
+    conn,
+    paste0(
+      "SELECT column_name, data_type FROM all_tab_columns WHERE owner = ",
+      owner,
+      " AND table_name = ",
+      sql_string(source$table)
+    )
+  )
+  names(cols) <- toupper(names(cols))
+  if (nrow(cols) == 0) {
+    stop(
+      "The table ",
+      source$qualified,
+      " does not exist in ",
+      database,
+      ", or you do not have access to read it.",
+      call. = FALSE
+    )
+  }
+  if (!source$column %in% cols$COLUMN_NAME) {
+    stop(
+      "There is no column ",
+      source$column,
+      " in ",
+      source$qualified,
+      ". Columns: ",
+      paste(cols$COLUMN_NAME, collapse = ", "),
+      ". Use column_name= for the id column.",
+      call. = FALSE
+    )
+  }
+  type <- cols$DATA_TYPE[cols$COLUMN_NAME == source$column][1]
+  warn_numeric_pnr(
+    identical(type, "NUMBER"),
+    source$id_column,
+    paste0(" (", source$qualified, ".", source$column, ")")
+  )
+  invisible(TRUE)
+}
+
+#' Create BEF_ID_PROC in DB_PSD from the distinct ids of an Oracle table
+#'
+#' Within DB_PSD the copy is made by Oracle; from other databases the ids are
+#' read into R and uploaded.
+#' @noRd
+copy_source_to_psd <- function(psd, in_conn, source, database) {
+  select <- paste0(
+    "select distinct ",
+    source$column,
+    " as ",
+    source$id_column,
+    " from ",
+    source$qualified
+  )
+  if (database == "DB_PSD") {
+    db_execute(psd, paste0("create table BEF_ID_PROC as ", select))
+  } else {
+    ids <- db_query(in_conn, select)
+    names(ids) <- toupper(names(ids))
+    warn_numeric_pnr(is.numeric(ids[[source$id_column]]), source$id_column)
+    db_write_table(psd, "BEF_ID_PROC", ids)
+  }
+  if (source$column != source$id_column) {
+    message(
+      "NOTE: Column ",
+      source$column,
+      " is uploaded as ",
+      source$id_column,
+      "."
+    )
   }
 }
 
+#' Copy the output table from DB_PSD to a new table in another database
+#'
+#' Reads and writes in chunks. If writing fails, the partly written target is
+#' dropped.
+#' @noRd
+copy_output <- function(psd, from, to_conn, to, to_schema, database) {
+  chunk_size <- getOption("DSTutils.chunk_size", 100000)
+  tryCatch(
+    db_read_chunked(
+      psd,
+      paste0("select * from ", from),
+      chunk_size,
+      function(chunk, first) {
+        db_write_table(to_conn, to, chunk, append = !first)
+      }
+    ),
+    error = function(e) {
+      tryCatch(
+        if (table_exists(to_conn, to, to_schema)) {
+          db_execute(to_conn, paste0("drop table ", to))
+        },
+        error = function(e2) {
+          warning(
+            "Could not drop the partly written table ",
+            to,
+            " in ",
+            database,
+            "; drop it manually. ",
+            conditionMessage(e2),
+            call. = FALSE
+          )
+        }
+      )
+      stop(
+        "Could not write the output to ",
+        to,
+        " in ",
+        database,
+        ": ",
+        conditionMessage(e),
+        call. = FALSE
+      )
+    }
+  )
+}
+
+#' Drop work tables left behind by an interrupted earlier run
+#'
+#' BEF_ID_PROC would make the upload fail. Run tables are unique per run, so
+#' only those older than a day are dropped; a newer one may belong to a run
+#' that is still going.
+#' @noRd
+drop_leftover_tables <- function(conn, schema) {
+  if (table_exists(conn, "BEF_ID_PROC", schema)) {
+    message(
+      "NOTE: Dropping table BEF_ID_PROC left in DB_PSD by an earlier, interrupted run."
+    )
+    db_execute(conn, "drop table BEF_ID_PROC")
+  }
+
+  tryCatch(
+    {
+      stale <- db_query(
+        conn,
+        paste0(
+          "SELECT object_name FROM user_objects WHERE object_type = 'TABLE' ",
+          "AND object_name LIKE 'PSDMYTEMP\\_%' ESCAPE '\\' ",
+          "AND created < SYSDATE - 1"
+        )
+      )
+      for (tbl in stale[[1]]) {
+        db_execute(conn, paste0("drop table ", tbl))
+      }
+    },
+    error = function(e) {
+      warning(
+        "Could not drop old PSDMYTEMP_ tables in DB_PSD. ",
+        conditionMessage(e),
+        call. = FALSE
+      )
+    }
+  )
+}
+
 #' Find the registry time for a validity date in D101200.bef_leverance_time
+#'
+#' Fetched as text, so the value is not shifted by a time-zone round trip
+#' through POSIXct. Trailing zeros of the fraction are removed
+#' ("18:00:00.000000" becomes "18:00:00").
 #' @noRd
 lookup_registry_time <- function(conn, validity_date) {
-  tid <- psd_query(
+  tid <- db_query(
     conn,
     paste0(
-      "select tid from (select min(time_stamp) as tid ",
+      "select TO_CHAR(min(CAST(time_stamp AS TIMESTAMP)), ",
+      "'YYYY-MM-DD HH24:MI:SS.FF6') as TID ",
       "from D101200.bef_leverance_time ",
-      "where trunc(cpr_slut) >= TO_DATE('",
-      validity_date,
-      "','YYYY-MM-DD'))"
+      "where trunc(cpr_slut) >= ",
+      sql_date(validity_date)
     )
   )$TID
   if (length(tid) == 0 || is.na(tid[1])) {
@@ -779,7 +1259,7 @@ lookup_registry_time <- function(conn, validity_date) {
       call. = FALSE
     )
   }
-  tid <- as.character(tid[1])
+  tid <- trim_fraction(as.character(tid[1]))
   message(paste(
     "The registry datetime used is =",
     tid,
@@ -788,12 +1268,21 @@ lookup_registry_time <- function(conn, validity_date) {
   tid
 }
 
-#' Read the procedure's result text and run id from PSDMYTEMP
+#' Drop trailing zeros from the fractional seconds of a timestamp string
 #' @noRd
-read_run_info <- function(conn) {
-  run <- psd_query(
+trim_fraction <- function(x) {
+  sub("\\.0+$", "", sub("(\\.[0-9]*[1-9])0+$", "\\1", x))
+}
+
+#' Read the procedure's result text and run id from the run table
+#' @noRd
+read_run_info <- function(conn, run_table) {
+  run <- db_query(
     conn,
-    "select v_resultat as RESULTAT, v_koerselsid as KOERSELSID from psdmytemp"
+    paste0(
+      "select v_resultat as RESULTAT, v_koerselsid as KOERSELSID from ",
+      run_table
+    )
   )
   if (nrow(run) == 0 || all(is.na(run$KOERSELSID))) {
     stop(
@@ -814,7 +1303,7 @@ cleanup_psd <- function(conn, tables, schema) {
   for (tbl in rev(unique(tables))) {
     tryCatch(
       if (table_exists(conn, tbl, schema)) {
-        psd_execute(conn, paste0("drop table ", tbl))
+        db_execute(conn, paste0("drop table ", tbl))
       },
       error = function(e) {
         warning(
@@ -827,5 +1316,5 @@ cleanup_psd <- function(conn, tables, schema) {
       }
     )
   }
-  tryCatch(psd_disconnect(conn), error = function(e) invisible(NULL))
+  tryCatch(db_disconnect(conn), error = function(e) invisible(NULL))
 }

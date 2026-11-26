@@ -1,5 +1,17 @@
 # DSTutils (development version)
 
+* `convert_person_id()` can read its input from and write its output to Oracle:
+  * `in_data = "ORACLE"` takes `in_table_name = "SCHEMA.TABLE"` from `in_database`. Within `DB_PSD` the distinct ids are copied with `CREATE TABLE ... AS SELECT`. From other databases they are read into R and uploaded. The table and id column are checked (`all_tab_columns`) before anything is uploaded.
+  * `out_data = "ORACLE"` saves the output as `out_table_name`. In `DB_PSD` the procedure's table is renamed and kept in your schema. For other databases it is copied in chunks (`options(DSTutils.chunk_size =)`), and a partly written table is dropped on error. The name is checked, the table must not exist, and CREATE TABLE is checked on the target, all before the upload. The table name is returned invisibly.
+  * New arguments `in_database`, `out_database` and `proxy` (proxy schema for databases other than `DB_PSD`). `database` is deprecated; if given, it is the default for both.
+  * The run-id table is now `PSDMYTEMP_<time>_<process id>` instead of `PSDMYTEMP`, so it no longer clashes with other runs or a SAS job. The old `PSDMYTEMP` is no longer dropped; run tables older than one day are. **This changes the PL/SQL block** (the `insert into` line only; the procedure call is unchanged).
+  * The registry time for the historic procedures is fetched as text, not as `POSIXct`. This avoids a time-zone round trip.
+  * A numeric `PNR` column gives a warning, because PNRs with day 01-09 have lost their leading zero.
+
+* New vignette `vignette("convert-person-id")`: one example per procedure family, and when to use validity vs. registry time.
+
+* **Breaking:** `add_person_id()` now drops the `PNR` column after conversion, as the SAS macro does. Use `drop_pnr = FALSE` to keep it.
+
 * `convert_person_id()` is restructured; its arguments and the PL/SQL sent to the BEF procedures are unchanged:
   * Inputs are checked before connecting, so bad procedure/date combinations no longer upload data to `DB_PSD` first. The combination error lists what the procedure accepts.
   * Work tables (`BEF_ID_PROC`, `PSDMYTEMP` and the output table) are dropped on every exit, including when a privilege check fails. Tables left by an interrupted run are dropped before the next run.
@@ -8,7 +20,6 @@
   * Fixed: `procedure = my_var` and `project_id = paste0(...)` sent the literal text to Oracle. Variables and expressions are now evaluated. Quoted strings and bare words work as before.
   * Milliseconds in `registry_time`, `registry_start_time` and `registry_end_time` are kept instead of being dropped.
   * `column_name` now works: it names the id column to upload as `PNR`/`PERSON_ID`.
-  * `in_data = "ORACLE"` and `out_data = "ORACLE"` fail at once with "not implemented". Before, `out_data = "ORACLE"` ran the conversion and returned `NULL`.
   * Privilege checks now count privileges granted through roles (`session_privs`, `all_tab_privs`).
   * The procedure's result text and the registry time used are shown with `message()` instead of `print()`.
   * The PL/SQL for every date mode is snapshot-tested, and the call sequence is tested against a fake database.

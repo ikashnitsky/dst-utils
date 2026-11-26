@@ -136,7 +136,8 @@ test_that("the input table is checked and the id column named as required", {
 
 test_that("generated PL/SQL is stable for every date mode", {
   plsql <- function(proc, mode, dates = list(), project_id = "D101200", recipient = "IKX") {
-    cat(build_bef_plsql(bef_procedure(proc), project_id, recipient, mode, dates))
+    run_table <- "PSDMYTEMP_261126120000_4242"
+    cat(build_bef_plsql(bef_procedure(proc), project_id, recipient, mode, dates, run_table))
   }
   expect_snapshot({
     plsql("BEF_OMKOD", "none")
@@ -234,27 +235,47 @@ test_that("invalid input fails before connecting", {
   )
   expect_error(
     convert_person_id(procedure = "BEF_OMKOD", in_table_name = pnr, in_data = "ORACLE"),
-    "not implemented"
+    "must be a table name"
   )
   expect_error(
     convert_person_id(procedure = "BEF_OMKOD", in_table_name = pnr, out_data = "ORACLE"),
-    "not implemented"
+    "out_table_name="
+  )
+  expect_error(
+    convert_person_id(
+      procedure = "BEF_OMKOD",
+      in_table_name = pnr,
+      out_data = "ORACLE",
+      out_table_name = "MY TABLE"
+    ),
+    "not a valid Oracle name"
   )
   expect_error(
     convert_person_id(procedure = "BEF_OMKOD", in_table_name = pnr, in_data = "SAS"),
     "must be \"R\" or \"ORACLE\""
+  )
+  expect_error(
+    convert_person_id(procedure = "BEF_OMKOD", in_table_name = pnr, proxy = "[D2; x]"),
+    "'proxy'"
   )
   expect_equal(db$connects, 0)
 })
 
 test_that("leftovers from an interrupted run are dropped first", {
   withr::local_envvar(USERNAME = "IKX")
-  db <- local_fake_psd(leftover = c("BEF_ID_PROC", "PSDMYTEMP"))
+  old_run <- "PSDMYTEMP_251126120000_1"
+  db <- local_fake_psd(
+    leftover = c("BEF_ID_PROC", "PSDMYTEMP", old_run, "PSDMYTEMP_261126115959_2"),
+    stale = old_run
+  )
   msgs <- capture_messages(
     convert_person_id(procedure = "BEF_OMKOD", in_table_name = pnr, project_id = "X")
   )
-  expect_equal(sum(grepl("left in DB_PSD by an earlier", msgs)), 2)
-  expect_length(db$tables, 0)
+  expect_equal(sum(grepl("left in DB_PSD by an earlier", msgs)), 1)
+  expect_true("drop table BEF_ID_PROC" %in% db$statements)
+  expect_true(paste("drop table", old_run) %in% db$statements)
+  # The legacy PSDMYTEMP (maybe a SAS job's) and a recent run table are kept
+  expect_setequal(db$tables, c("PSDMYTEMP", "PSDMYTEMP_261126115959_2"))
 })
 
 test_that("round run ids find their output table", {
@@ -265,6 +286,411 @@ test_that("round run ids find their output table", {
   )
   expect_s3_class(res, "data.frame")
   expect_true("select * from PNROMKOD3000000" %in% db$statements)
+})
+
+test_that("Oracle names, proxies and source tables are validated", {
+  expect_equal(check_identifier("my_tab$1", "x"), "MY_TAB$1")
+  expect_error(check_identifier("1TAB", "x"), "not a valid Oracle name")
+  expect_error(check_identifier("A.B", "x"), "not a valid Oracle name")
+  expect_error(check_identifier("a'--", "x"), "not a valid Oracle name")
+  expect_error(check_identifier(strrep("A", 129), "x"), "not a valid Oracle name")
+
+  expect_equal(check_proxy("d222401"), "[D222401]")
+  expect_equal(check_proxy("[D222401]"), "[D222401]")
+
+  expect_equal(check_out_table_name("idskift_2024"), "IDSKIFT_2024")
+  expect_error(check_out_table_name(NULL), "out_table_name=")
+  expect_error(check_out_table_name("bef_id_proc"), "work table")
+  expect_error(check_out_table_name("PSDMYTEMP"), "work table")
+
+  src <- parse_source_table("d222401.persons", NULL, "PERSON_ID")
+  expect_equal(src$schema, "D222401")
+  expect_equal(src$qualified, "D222401.PERSONS")
+  expect_equal(src$column, "PERSON_ID")
+  src <- parse_source_table("persons", "cpr_nr", "PNR")
+  expect_null(src$schema)
+  expect_equal(src$qualified, "PERSONS")
+  expect_equal(src$column, "CPR_NR")
+  expect_error(parse_source_table("a.b.c", NULL, "PNR"), "SCHEMA.TABLE")
+  expect_error(parse_source_table("X.BEF_ID_PROC", NULL, "PNR"), "work table")
+  expect_error(parse_source_table(pnr, NULL, "PNR"), "must be a table name")
+  expect_error(parse_source_table("T", "bad col", "PNR"), "column_name")
+})
+
+test_that("run tables get unique names within Oracle's 30-character limit", {
+  t <- as.POSIXct("2026-11-26 12:34:56", tz = "UTC")
+  expect_equal(run_table_name(t, 1234567), "PSDMYTEMP_261126123456_34567")
+  expect_lte(nchar(run_table_name(t, 99999)), 30)
+  expect_match(run_table_name(), "^PSDMYTEMP_[0-9]{12}_[0-9]{1,5}$")
+})
+
+test_that("trailing zeros of the registry time fraction are trimmed", {
+  expect_equal(trim_fraction("2022-01-16 18:00:00.000000"), "2022-01-16 18:00:00")
+  expect_equal(trim_fraction("2022-01-16 18:00:10.000000"), "2022-01-16 18:00:10")
+  expect_equal(trim_fraction("2022-01-16 18:00:00.123000"), "2022-01-16 18:00:00.123")
+  expect_equal(trim_fraction("2022-01-16 18:00:00"), "2022-01-16 18:00:00")
+})
+
+test_that("numeric PNRs give a warning", {
+  expect_warning(
+    prepare_input_table(data.frame(PNR = 101011234), "PNR", NULL, "BEF_OMKOD"),
+    "lost their leading zero"
+  )
+  expect_no_warning(prepare_input_table(pnr, "PNR", NULL, "BEF_OMKOD"))
+  # PERSON_IDs are numbers anyway
+  expect_no_warning(
+    prepare_input_table(data.frame(PERSON_ID = 1), "PERSON_ID", NULL, "BEF_IDSKIFT")
+  )
+})
+
+test_that("the run table name is used in the PL/SQL and dropped afterwards", {
+  withr::local_envvar(USERNAME = "IKX")
+  db <- local_fake_psd()
+  suppressMessages(
+    convert_person_id(procedure = "BEF_OMKOD", in_table_name = pnr, project_id = "X")
+  )
+  run_table <- sub("^create table (PSDMYTEMP_\\w+) .*", "\\1", grep(
+    "^create table PSDMYTEMP_",
+    db$statements,
+    value = TRUE
+  ))
+  expect_length(run_table, 1)
+  expect_match(db$plsql, paste0("insert into ", run_table, " values"), fixed = TRUE)
+  expect_true(paste("drop table", run_table) %in% db$statements)
+  expect_length(db$tables, 0)
+})
+
+test_that("the registry time is fetched as text", {
+  withr::local_envvar(USERNAME = "IKX")
+  db <- local_fake_psd()
+  suppressMessages(convert_person_id(
+    procedure = "BEF_HISTORISK_PNR",
+    in_table_name = pid,
+    project_id = "X",
+    validity_date = 31122021
+  ))
+  lookup <- grep("bef_leverance_time", db$statements, value = TRUE)
+  expect_match(lookup, "TO_CHAR(min(CAST(time_stamp AS TIMESTAMP))", fixed = TRUE)
+  expect_match(lookup, "TO_DATE('2021-12-31', 'YYYY-MM-DD')", fixed = TRUE)
+  expect_match(
+    db$plsql,
+    "p_registerdato   => TO_TIMESTAMP('2022-01-16 18:00:00', ",
+    fixed = TRUE
+  )
+})
+
+test_that("'database' still works but is deprecated", {
+  withr::local_envvar(USERNAME = "IKX")
+  db <- local_fake_psd()
+  msgs <- capture_messages(
+    convert_person_id(
+      procedure = "BEF_OMKOD",
+      database = "DB_PSD",
+      in_table_name = pnr,
+      project_id = "X"
+    )
+  )
+  expect_match(msgs, "'database' is deprecated", all = FALSE)
+  expect_length(db$remote_connects, 0)
+})
+
+# in_data = "ORACLE" ------------------------------------------------------------
+
+test_that("an Oracle table in DB_PSD is copied with CREATE TABLE AS SELECT", {
+  withr::local_envvar(USERNAME = "IKX")
+  db <- local_fake_psd(
+    source_columns = data.frame(COLUMN_NAME = c("ID", "CPR_NR"), DATA_TYPE = "VARCHAR2")
+  )
+  msgs <- capture_messages(
+    res <- convert_person_id(
+      procedure = "BEF_OMKOD",
+      in_data = "ORACLE",
+      in_table_name = "d222401.persons",
+      column_name = "cpr_nr",
+      project_id = "X"
+    )
+  )
+  expect_s3_class(res, "data.frame")
+  expect_match(msgs, "CPR_NR is uploaded as PNR", all = FALSE)
+  expect_true(any(grepl(
+    "all_tab_columns WHERE owner = 'D222401' AND table_name = 'PERSONS'",
+    db$statements,
+    fixed = TRUE
+  )))
+  expect_true(
+    "create table BEF_ID_PROC as select distinct CPR_NR as PNR from D222401.PERSONS" %in%
+      db$statements
+  )
+  expect_length(db$uploads, 0)
+  expect_length(db$remote_connects, 0)
+  # The procedure still reads BEF_ID_PROC
+  expect_match(db$plsql, "p_ind_tabelnavn => 'BEF_ID_PROC'", fixed = TRUE)
+  expect_length(db$tables, 0)
+})
+
+test_that("an unqualified source table is looked up in the user's schema", {
+  withr::local_envvar(USERNAME = "IKX")
+  db <- local_fake_psd()
+  suppressMessages(convert_person_id(
+    procedure = "BEF_OMKOD",
+    in_data = "ORACLE",
+    in_table_name = "persons",
+    project_id = "X"
+  ))
+  expect_true(any(grepl("owner = USER AND table_name = 'PERSONS'", db$statements)))
+})
+
+test_that("an Oracle table in another database is read and uploaded", {
+  withr::local_envvar(USERNAME = "IKX")
+  db <- local_fake_psd(
+    source_columns = data.frame(COLUMN_NAME = "PERSON_ID", DATA_TYPE = "NUMBER"),
+    source_rows = data.frame(PERSON_ID = c(1, 2))
+  )
+  suppressMessages(convert_person_id(
+    procedure = "BEF_IDSKIFT",
+    in_data = "ORACLE",
+    in_table_name = "D222401.PERSONS",
+    in_database = "statprod",
+    proxy = "D222401",
+    project_id = "X"
+  ))
+  expect_equal(db$remote_connects, "STATPROD[D222401]")
+  expect_true(
+    "select distinct PERSON_ID as PERSON_ID from D222401.PERSONS" %in%
+      db$remote_statements
+  )
+  expect_equal(db$uploads$BEF_ID_PROC, data.frame(PERSON_ID = c(1, 2)))
+  expect_equal(db$remote_disconnects, 1)
+  expect_length(db$tables, 0)
+})
+
+test_that("a missing or unreadable source fails before anything is uploaded", {
+  withr::local_envvar(USERNAME = "IKX")
+  db <- local_fake_psd(
+    source_columns = data.frame(COLUMN_NAME = character(), DATA_TYPE = character())
+  )
+  expect_error(
+    suppressMessages(convert_person_id(
+      procedure = "BEF_OMKOD",
+      in_data = "ORACLE",
+      in_table_name = "D222401.NOPE",
+      project_id = "X"
+    )),
+    "D222401.NOPE does not exist in DB_PSD, or you do not have access"
+  )
+  expect_length(db$plsql, 0)
+
+  db <- local_fake_psd(source_columns = data.frame(COLUMN_NAME = "ID", DATA_TYPE = "NUMBER"))
+  expect_error(
+    suppressMessages(convert_person_id(
+      procedure = "BEF_OMKOD",
+      in_data = "ORACLE",
+      in_table_name = "D222401.PERSONS",
+      project_id = "X"
+    )),
+    "no column PNR in D222401.PERSONS. Columns: ID"
+  )
+  expect_length(db$plsql, 0)
+  expect_length(db$tables, 0)
+})
+
+test_that("a numeric PNR column in Oracle gives a warning", {
+  withr::local_envvar(USERNAME = "IKX")
+  db <- local_fake_psd(source_columns = data.frame(COLUMN_NAME = "PNR", DATA_TYPE = "NUMBER"))
+  expect_warning(
+    suppressMessages(convert_person_id(
+      procedure = "BEF_OMKOD",
+      in_data = "ORACLE",
+      in_table_name = "D222401.PERSONS",
+      project_id = "X"
+    )),
+    "PNR \\(D222401.PERSONS.PNR\\) is numeric"
+  )
+})
+
+# out_data = "ORACLE" -----------------------------------------------------------
+
+test_that("output kept in DB_PSD is renamed and not dropped", {
+  withr::local_envvar(USERNAME = "IKX")
+  db <- local_fake_psd()
+  msgs <- capture_messages(
+    res <- withVisible(convert_person_id(
+      procedure = "BEF_OMKOD",
+      in_table_name = pnr,
+      project_id = "X",
+      out_data = "ORACLE",
+      out_table_name = "my_ids"
+    ))
+  )
+  expect_false(res$visible)
+  expect_equal(res$value, "MY_IDS")
+  expect_match(msgs, "Output saved as IKX.MY_IDS in DB_PSD", all = FALSE)
+  expect_true("alter table PNROMKOD4711 rename to MY_IDS" %in% db$statements)
+  expect_false(any(grepl("^select \\* from", db$statements)))
+  expect_equal(db$tables, "MY_IDS")
+  expect_length(db$remote_connects, 0)
+})
+
+test_that("an existing target table fails before anything is uploaded", {
+  withr::local_envvar(USERNAME = "IKX")
+  db <- local_fake_psd(leftover = "MY_IDS")
+  expect_error(
+    suppressMessages(convert_person_id(
+      procedure = "BEF_OMKOD",
+      in_table_name = pnr,
+      project_id = "X",
+      out_data = "ORACLE",
+      out_table_name = "MY_IDS"
+    )),
+    "IKX.MY_IDS already exists in DB_PSD"
+  )
+  expect_length(db$uploads, 0)
+  expect_length(db$plsql, 0)
+  expect_equal(db$tables, "MY_IDS")
+
+  db <- local_fake_psd(remote = "STATPROD:MY_IDS")
+  expect_error(
+    suppressMessages(convert_person_id(
+      procedure = "BEF_OMKOD",
+      in_table_name = pnr,
+      project_id = "X",
+      out_data = "ORACLE",
+      out_table_name = "MY_IDS",
+      out_database = "STATPROD",
+      proxy = "D222401"
+    )),
+    "D222401.MY_IDS already exists in STATPROD"
+  )
+  expect_length(db$plsql, 0)
+})
+
+test_that("output for another database is copied in chunks", {
+  withr::local_envvar(USERNAME = "IKX")
+  withr::local_options(DSTutils.chunk_size = 2)
+  out <- data.frame(GL_PERSON_ID = 1:5, NY_PERSON_ID = 11:15)
+  db <- local_fake_psd(output = out)
+  msgs <- capture_messages(convert_person_id(
+    procedure = "BEF_IDSKIFT",
+    in_table_name = pid,
+    project_id = "X",
+    out_data = "ORACLE",
+    out_table_name = "IDSKIFT_2024",
+    out_database = "STATPROD",
+    proxy = "[D222401]"
+  ))
+  expect_match(msgs, "Output saved as D222401.IDSKIFT_2024 in STATPROD", all = FALSE)
+  expect_equal(db$remote_writes[["STATPROD:IDSKIFT_2024"]], out, ignore_attr = TRUE)
+  expect_equal(db$remote, "STATPROD:IDSKIFT_2024")
+  expect_true(any(grepl("session_privs", db$remote_statements)))
+  # The procedure's table in DB_PSD is dropped
+  expect_length(db$tables, 0)
+  expect_equal(db$remote_disconnects, 1)
+})
+
+test_that("input and output in the same other database share a connection", {
+  withr::local_envvar(USERNAME = "IKX")
+  db <- local_fake_psd(
+    source_columns = data.frame(COLUMN_NAME = "PERSON_ID", DATA_TYPE = "NUMBER"),
+    source_rows = data.frame(PERSON_ID = 1)
+  )
+  suppressMessages(convert_person_id(
+    procedure = "BEF_IDSKIFT",
+    in_data = "ORACLE",
+    in_table_name = "D222401.PERSONS",
+    out_data = "ORACLE",
+    out_table_name = "IDSKIFT_2024",
+    database = "STATPROD",
+    proxy = "D222401",
+    project_id = "X"
+  ))
+  expect_equal(db$remote_connects, "STATPROD[D222401]")
+  expect_equal(db$remote_disconnects, 1)
+})
+
+test_that("a target without CREATE TABLE fails before anything is uploaded", {
+  withr::local_envvar(USERNAME = "IKX")
+  db <- local_fake_psd(remote_create = FALSE)
+  expect_error(
+    suppressMessages(convert_person_id(
+      procedure = "BEF_OMKOD",
+      in_table_name = pnr,
+      project_id = "X",
+      out_data = "ORACLE",
+      out_table_name = "MY_IDS",
+      out_database = "STATPROD"
+    )),
+    "IKX does not have privileges to create tables in STATPROD"
+  )
+  expect_length(db$uploads, 0)
+  expect_length(db$plsql, 0)
+})
+
+test_that("a failed copy drops the partly written target and the work tables", {
+  withr::local_envvar(USERNAME = "IKX")
+  withr::local_options(DSTutils.chunk_size = 2)
+  db <- local_fake_psd(
+    output = data.frame(PNR = letters[1:5], PERSON_ID = 1:5),
+    fail_write_at = 4
+  )
+  expect_error(
+    suppressMessages(convert_person_id(
+      procedure = "BEF_OMKOD",
+      in_table_name = pnr,
+      project_id = "X",
+      out_data = "ORACLE",
+      out_table_name = "MY_IDS",
+      out_database = "STATPROD"
+    )),
+    "Could not write the output to MY_IDS in STATPROD: ORA-01653"
+  )
+  expect_true("drop table MY_IDS" %in% db$remote_statements)
+  expect_length(db$remote, 0)
+  expect_length(db$tables, 0)
+})
+
+test_that("db_read_chunked() and db_write_table() copy in chunks with DBI", {
+  skip_if_not_installed("RSQLite")
+  from <- DBI::dbConnect(RSQLite::SQLite(), ":memory:")
+  to <- DBI::dbConnect(RSQLite::SQLite(), ":memory:")
+  withr::defer({
+    DBI::dbDisconnect(from)
+    DBI::dbDisconnect(to)
+  })
+  DBI::dbWriteTable(from, "OUT", data.frame(A = 1:5, B = letters[1:5]))
+  DBI::dbWriteTable(from, "EMPTY", data.frame(A = integer()))
+
+  firsts <- logical()
+  n <- db_read_chunked(from, "select * from OUT", 2, function(chunk, first) {
+    firsts <<- c(firsts, first)
+    db_write_table(to, "COPY", chunk, append = !first)
+  })
+  expect_equal(n, 5)
+  expect_equal(firsts, c(TRUE, FALSE, FALSE))
+  expect_equal(DBI::dbReadTable(to, "COPY"), DBI::dbReadTable(from, "OUT"))
+
+  # An empty result still creates the table
+  n <- db_read_chunked(from, "select * from EMPTY", 2, function(chunk, first) {
+    db_write_table(to, "EMPTY_COPY", chunk, append = !first)
+  })
+  expect_equal(n, 0)
+  expect_true(DBI::dbExistsTable(to, "EMPTY_COPY"))
+})
+
+# add_person_id() -----------------------------------------------------------------
+
+test_that("add_person_id() drops PNR unless asked to keep it", {
+  withr::local_envvar(USERNAME = "IKX")
+  data <- data.frame(pnr = c("0101011234", "0101011234"), x = 1:2)
+  db <- local_fake_psd()
+
+  res <- suppressMessages(add_person_id(data))
+  expect_named(res, c("X", "PERSON_ID"))
+  expect_equal(res$PERSON_ID, c(1, 1))
+  # Only the distinct PNRs are uploaded
+  expect_equal(db$uploads$BEF_ID_PROC, data.frame(PNR = "0101011234"))
+
+  res <- suppressMessages(add_person_id(data, drop_pnr = FALSE))
+  expect_named(res, c("PNR", "X", "PERSON_ID"))
 })
 
 # Tests against the real DB_PSD -----------------------------------------------
@@ -392,4 +818,43 @@ test_that("BEF_OMKOD and BEF_INVALIDE procedures work", {
     procedure = "BEF_INVALIDE"
   )
   expect_s3_class(test_inv, "data.frame")
+})
+
+test_that("Oracle input and output within DB_PSD work", {
+  skip_if_no_db()
+
+  psd <- DSTdb::get_conn("DB_PSD")
+  withr::defer(DBI::dbDisconnect(psd))
+  src <- "DSTUTILS_TEST_SRC"
+  out <- "DSTUTILS_TEST_OUT"
+  drop_test_tables <- function() {
+    for (tbl in c(src, out)) {
+      if (DBI::dbExistsTable(psd, tbl)) DBI::dbRemoveTable(psd, tbl)
+    }
+  }
+  drop_test_tables()
+  withr::defer(drop_test_tables())
+  DBI::dbWriteTable(psd, src, data.frame(PERSON_ID = c("1234", "2345", "1234")))
+
+  name <- convert_person_id(
+    procedure = "BEF_AKTUELLE_PNR",
+    in_data = "ORACLE",
+    in_table_name = src,
+    out_data = "ORACLE",
+    out_table_name = out
+  )
+  expect_equal(name, out)
+  res <- DBI::dbGetQuery(psd, paste("select * from", out))
+  expect_true("PNR" %in% names(res))
+  # The output table must not exist twice
+  expect_error(
+    convert_person_id(
+      procedure = "BEF_AKTUELLE_PNR",
+      in_data = "ORACLE",
+      in_table_name = src,
+      out_data = "ORACLE",
+      out_table_name = out
+    ),
+    "already exists"
+  )
 })

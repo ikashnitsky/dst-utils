@@ -4,14 +4,20 @@
 \alias{add_person_id}
 \title{Convert PNR to PERSON_ID}
 \usage{
-add_person_id(data)
+add_person_id(data, drop_pnr = TRUE)
 }
 \arguments{
-\item{data}{A data.frame containing a PNR column.}
+\item{data}{A data.frame containing a PNR column (any case).}
+
+\item{drop_pnr}{Drop the \code{PNR} column from the result, as the SAS macro
+does (default). Use \code{FALSE} to keep it.}
 }
 \value{
-The original data.frame joined with PERSON_ID.
+\code{data} with column names in upper case, joined with \code{PERSON_ID},
+without \code{PNR} unless \code{drop_pnr = FALSE}.
 }
 \description{
-This function takes a table with a PNR column and adds a PERSON_ID column.
+Takes a table with a \code{PNR} column and adds the matching
+\code{PERSON_ID} (procedure \code{BEF_OMKOD}). Only the distinct PNRs are sent to
+\code{DB_PSD}.
 }

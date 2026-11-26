@@ -1,0 +1,187 @@
+---
+title: "Converting between CPR and PERSON_ID"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{Converting between CPR and PERSON_ID}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r, include = FALSE}
+# The examples need DB_PSD at DST, so they are not run when the vignette is
+# built.
+knitr::opts_chunk$set(eval = FALSE, collapse = TRUE, comment = "#>")
+```
+
+`convert_person_id()` runs the BEF conversion procedures in `DB_PSD`. You
+choose a procedure and give it a set of `PNR`s or `PERSON_ID`s. You get the
+procedure's output table back as a data frame, or saved as an Oracle table.
+
+This vignette gives one example per procedure family. The method behind the
+procedures is described in "Metodevejledning konvertering mellem cpr og
+person_id" (K22, `G:\k22\01 Metode\Diskretionering\Pseudonymisering`).
+
+```{r}
+library(DSTutils)
+```
+
+## Two kinds of time
+
+Every row in the BEF tables has two periods:
+
+* **Validity** (`VFRA`–`VTIL`): when the link between `PNR` and `PERSON_ID`
+  held in reality.
+* **Registry** (`RFRA`–`RTIL`): when the registry recorded it that way.
+  Corrections close the old row in registry time and add a new one.
+
+The date arguments pick rows from these periods:
+
+| You want | Procedure family | Date arguments |
+|---|---|---|
+| The ids as known today | current (`AKTUEL*`, `BEF_OMKOD`) | none |
+| The ids valid on a date, as known today | current | `validity_date` |
+| The ids valid on a date, as known at a given time | historic (`HISTORISK*`) | `validity_date`, optionally `registry_time` |
+| Every version within a registry interval | full history (`FULD_HIS*`) | none, or `registry_start_time` + `registry_end_time` |
+
+Use the historic procedures to reproduce an earlier extract. If you give
+only `validity_date`, the registry time is set to the first delivery that
+covers that date (from `D101200.bef_leverance_time`).
+
+Other combinations are an error. The error message lists what the procedure
+accepts.
+
+## Current ids
+
+```{r}
+pnr <- data.frame(PNR = c("0101011234", "0202024321"))
+
+# PERSON_ID as known today
+ids <- convert_person_id(
+  procedure = "BEF_AKTUELLE_ID",
+  in_table_name = pnr,
+  project_id = "D101200"
+)
+
+# PNR valid on 31 December 2021, as known today
+convert_person_id(
+  procedure = "BEF_AKTUELLE_PNR",
+  in_table_name = data.frame(PERSON_ID = ids$PERSON_ID),
+  project_id = "D101200",
+  validity_date = 31122021
+)
+```
+
+For the most common case, adding `PERSON_ID` to a data frame with `PNR`,
+use `add_person_id()`. It sends only the distinct PNRs and drops `PNR` from
+the result (set `drop_pnr = FALSE` to keep it):
+
+```{r}
+my_data <- data.frame(pnr = c("0101011234", "0101011234"), income = c(1, 2))
+add_person_id(my_data)
+```
+
+## Historic ids
+
+```{r}
+pid <- data.frame(PERSON_ID = ids$PERSON_ID)
+
+# Valid on 31 December 2021, as known at the first delivery after that date
+convert_person_id(
+  procedure = "BEF_HISTORISK_PNR",
+  in_table_name = pid,
+  project_id = "D101200",
+  validity_date = 31122021
+)
+
+# ... or as known at a time you choose
+convert_person_id(
+  procedure = "BEF_HISTORISK_PNR",
+  in_table_name = pid,
+  project_id = "D101200",
+  validity_date = 31122021,
+  registry_time = "16012022 18:00:00"
+)
+```
+
+## Full history
+
+```{r}
+# All versions
+convert_person_id(
+  procedure = "BEF_FULD_HISTORIK_ID",
+  in_table_name = pid,
+  project_id = "D101200"
+)
+
+# Only versions recorded within a registry interval
+convert_person_id(
+  procedure = "BEF_FULD_HISTORIK_ID",
+  in_table_name = pid,
+  project_id = "D101200",
+  registry_start_time = "01012020 00:00:00",
+  registry_end_time = "31122021 23:59:59"
+)
+```
+
+The `KOEN_FOEDSELSDAG` procedures (sex and birthday for a `PERSON_ID`) come
+in the same three families and take the same date arguments.
+
+## PERSON_ID shifts and invalid ids
+
+```{r}
+# Which PERSON_IDs have been replaced, and by what
+convert_person_id(
+  procedure = "BEF_IDSKIFT",
+  in_table_name = pid,
+  project_id = "D101200"
+)
+
+# Invalid ids; takes no input table
+convert_person_id(procedure = "BEF_INVALIDE", project_id = "D101200")
+```
+
+## Tables in Oracle
+
+The input can be an Oracle table and the output can be saved as one. The ids
+then don't have to pass through R. Only the distinct values of the id column
+are used:
+
+```{r}
+# Input and output in a project schema on another database
+convert_person_id(
+  procedure = "BEF_IDSKIFT",
+  in_data = "ORACLE",
+  in_table_name = "D222401.PERSON_ID_TABEL",
+  in_database = "STATPROD",
+  out_data = "ORACLE",
+  out_table_name = "IDSKIFT_2024",
+  out_database = "STATPROD",
+  proxy = "D222401",
+  project_id = "D222401"
+)
+
+# Input in DB_PSD, id column with another name, output kept in your
+# DB_PSD schema
+convert_person_id(
+  procedure = "BEF_OMKOD",
+  in_data = "ORACLE",
+  in_table_name = "MIN_TABEL",
+  column_name = "CPR_NR",
+  out_data = "ORACLE",
+  out_table_name = "MIN_TABEL_ID",
+  project_id = "D101200"
+)
+```
+
+A table kept in `DB_PSD` stays until you drop it. If it holds CPR numbers,
+drop it as soon as you are done.
+
+## Pitfalls
+
+* **PNR must be text.** A PNR stored as a number has lost the leading zero of
+  days 01-09 and will not be found. You get a warning; convert first with
+  `sprintf("%010.0f", PNR)`.
+* **Ids that are not found** come back as `PNR = "Ukendt-PNR"` or
+  `PERSON_ID = 999999999999999`.
+* **One run at a time per user.** Runs share the input work table
+  `BEF_ID_PROC` in your `DB_PSD` schema.
