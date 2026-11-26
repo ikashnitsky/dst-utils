@@ -117,12 +117,17 @@ test_that("log directory falls back from argument to option to env var to user d
   )
   Sys.unsetenv("DSTUTILS_PRIVILEGE_LOG_DIR")
 
+  # Paths are normalized to absolute form, which is OS-specific (drive
+  # letters, UNC shares on Windows), so compare against normalized paths.
+  base <- withr_tempdir()
+  norm <- function(...) normalizePath(file.path(base, ...), winslash = "/", mustWork = FALSE)
+
   expect_match(privilege_log_dir(), "DSTutils")
-  Sys.setenv(DSTUTILS_PRIVILEGE_LOG_DIR = "/env/dir")
-  expect_equal(privilege_log_dir(), "/env/dir")
-  options(DSTutils.privilege_log_dir = "/opt/dir")
-  expect_equal(privilege_log_dir(), "/opt/dir")
-  expect_equal(privilege_log_dir("/arg/dir"), "/arg/dir")
+  Sys.setenv(DSTUTILS_PRIVILEGE_LOG_DIR = file.path(base, "env"))
+  expect_equal(privilege_log_dir(), norm("env"))
+  options(DSTutils.privilege_log_dir = file.path(base, "opt"))
+  expect_equal(privilege_log_dir(), norm("opt"))
+  expect_equal(privilege_log_dir(file.path(base, "arg")), norm("arg"))
 })
 
 test_that("executing a plan logs every attempt, including failures", {
