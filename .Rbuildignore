@@ -2,4 +2,7 @@
 ^\.Rproj\.user$
 ^agents\.md$
 ^dev$
-^^\\.positai$$
+^\.positai$
+^\.posit$
+^README\.qmd$
+^inst/docs$

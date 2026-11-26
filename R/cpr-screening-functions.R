@@ -1,3 +1,5 @@
+utils::globalVariables(c("hits", "name"))
+
 # ..........................................................
 # 2026-09-24 -- DSTutils
 # screen dataset for CPR                -----------

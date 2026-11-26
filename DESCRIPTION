@@ -18,7 +18,7 @@ Authors@R:
     "Sarah", "Neisig Andersen", role = c("ctb")
   )
     )
-Description: Utilities for data transformation pipelines at Statistics Denmark. Currently contains: person ID conversion, CPR screening, shiny app to manage DB privileges
+Description: Utilities for data transformation pipelines at Statistics Denmark: person ID conversion, CPR screening, and a Shiny app to manage database privileges.
 License: MIT + file LICENSE
 Encoding: UTF-8
 Roxygen: list(markdown = TRUE)
@@ -27,7 +27,6 @@ Depends:
 Imports:
     dplyr,
     purrr,
-    stringr,
     lubridate,
     tidyselect,
     DBI,

@@ -2,7 +2,9 @@
 #
 # For names and explanations of the procedures see "Metodevejledning
 # konvertering mellem cpr og person_id..." in
-# "G:\k22\01 Metode\Diskretionering\Pseudonymisering".
+# "G:\k22\01 Metode\Diskretionering\Pseudonymisering". A copy is in the source
+# repo (not in the built package):
+# inst/docs/Metodevejledning-konvertering-mellem-cpr-og-person_id-240817.pdf.
 #
 # The Oracle side is not under our control. What is sent to it must stay
 # compatible with the procedures, in particular:

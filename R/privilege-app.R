@@ -93,7 +93,7 @@ privilege_app_ui <- function(dry_run, database, schema, log_file) {
         ),
         shiny::actionButton(
           "review",
-          "Review statements…",
+          "Review statements\u2026",
           class = "btn-primary",
           icon = shiny::icon("list-check")
         )
@@ -212,7 +212,7 @@ privilege_app_server <- function(dry_run, log_file) {
         rv$backend <- NULL
       }
       backend <- tryCatch(
-        shiny::withProgress(message = "Connecting…", {
+        shiny::withProgress(message = "Connecting\u2026", {
           if (dry_run) {
             new_dry_run_backend(database, schema)
           } else {
@@ -309,7 +309,7 @@ privilege_app_server <- function(dry_run, log_file) {
       shiny::removeModal()
       rv$plan <- NULL
       rv$result <- shiny::withProgress(
-        message = "Executing statements…",
+        message = "Executing statements\u2026",
         execute_privilege_plan(
           backend = rv$backend,
           plan = plan,
