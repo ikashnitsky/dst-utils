@@ -2,13 +2,78 @@
 % Please edit documentation in R/dst_db_privilege_management.R
 \name{dst_db_privilege_management}
 \alias{dst_db_privilege_management}
-\title{Interactive DB Privilege management}
+\title{Interactive DB privilege management}
 \usage{
-dst_db_privilege_management()
+dst_db_privilege_management(
+  dry_run = FALSE,
+  database = "STATPROD",
+  schema = "",
+  log_dir = NULL,
+  launch.browser = getOption("shiny.launch.browser", interactive())
+)
+}
+\arguments{
+\item{dry_run}{If \code{TRUE}, no database is contacted. A simulated schema
+with a few tables and privileges is used, and actions are logged to a
+sandbox log in \code{\link[=tempdir]{tempdir()}}, unless \code{log_dir} is given explicitly. Useful
+for trying the app, training and development outside the secure
+environment.}
+
+\item{database}{Database name pre-filled in the app.}
+
+\item{schema}{Project schema pre-filled in the app, e.g. \code{"D221911"}.}
+
+\item{log_dir}{Directory for the log file; see the section 'The log'.}
+
+\item{launch.browser}{Passed to \code{\link[shiny:runApp]{shiny::runApp()}}.}
 }
 \value{
-Opens a shiny app session.
+Called for its side effect of running the app; returns the value
+of \code{\link[shiny:runApp]{shiny::runApp()}} invisibly.
 }
 \description{
-An interactive shiny app to manage database privileges at DST.
+Opens a Shiny app to grant and revoke privileges on the tables of a
+project schema at DST, with an audit log of every action.
+}
+\details{
+The app connects with \code{DSTdb::get_conn(database, proxy = "[<schema>]")},
+i.e. as the project schema, and only manages privileges on that schema's
+own tables and views. Every statement is shown for review before it runs,
+and every attempt (successful or not) is written to the log together with
+the person who ran it and the required reason.
+}
+\section{The log}{
+
+The log is one CSV file, \code{privilege_log.csv}, in \code{log_dir}. It is keyed by
+\emph{what is governed} (database and schema columns) and records \emph{who acted}
+(\code{performed_by}, taken from the login, not typed in). Where it lives is
+resolved in this order:
+\enumerate{
+\item the \code{log_dir} argument;
+\item \code{options(DSTutils.privilege_log_dir = ...)}, e.g. in \code{.Rprofile};
+\item the environment variable \code{DSTUTILS_PRIVILEGE_LOG_DIR};
+\item a per-user folder, \code{tools::R_user_dir("DSTutils", "data")}.
+}
+
+The per-user default always works but is only visible to you. When several
+people administer the same project schema, point all of them at one shared
+folder (for example in the project's area on the shared drive), so the log
+holds the complete history of that schema. Concurrent writes are
+serialized with a lock file. The "Current access" tab compares the log
+with what the database actually reports, which reveals privileges granted
+or revoked outside the app.
+}
+
+\examples{
+if (interactive()) {
+  # Try it anywhere, no database needed
+  dst_db_privilege_management(dry_run = TRUE)
+
+  # In the secure environment, with a log shared by the project team
+  dst_db_privilege_management(
+    schema = "D221911",
+    log_dir = "path/to/project/folder/privilege-log"
+  )
+}
+
 }

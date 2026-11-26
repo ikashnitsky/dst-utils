@@ -1,3 +1,13 @@
+# DSTutils (development version)
+
+* `dst_db_privilege_management()` is rewritten:
+  * New `dry_run = TRUE` mode runs the full app against a simulated schema, without `DSTdb` or a database.
+  * The log no longer lives inside the installed package (where it was lost on reinstall and usually not writable). It is resolved from the `log_dir` argument, the `DSTutils.privilege_log_dir` option, the `DSTUTILS_PRIVILEGE_LOG_DIR` environment variable, or a per-user default. Writes use a lock, so a team can share one log.
+  * Each attempt is logged straight away, failures included, with the login of the person who ran it (no longer typed in) and a required reason. Logs written by the old app are upgraded automatically, and a backup is kept.
+  * Statements are listed for review before they run. Revoking is now supported. Names are checked before any SQL is built, and grants to `PUBLIC` are blocked.
+  * A new "Current access" tab compares the database's privileges with the log.
+  * Built with `bslib`; no external fonts or CSS (`bslib` and `DT` added to Imports).
+
 # DSTutils 0.2.1
 
 * CPR screening: the numeric gate is lowered from `1e9` to `1e8`, so numeric CPRs with day 01-09 (which lose their leading zero) are detected.
