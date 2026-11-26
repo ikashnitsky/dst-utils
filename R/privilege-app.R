@@ -7,6 +7,94 @@ privilege_app <- function(dry_run, database, schema, log_file) {
   )
 }
 
+# Dark theme, using the palette of the original app. Fonts are listed, not
+# downloaded: Inter / JetBrains Mono are used where installed, otherwise the
+# system font, so the app works on networks without internet access.
+privilege_app_theme <- function() {
+  palette <- list(
+    app = "#0d1117",
+    sidebar = "#111827",
+    card = "#161e2e",
+    card_header = "#1a2234",
+    hover = "#1f2d42",
+    border = "#1e2f47",
+    border_light = "#243550",
+    accent = "#00c9a7",
+    text = "#e2e8f0",
+    muted = "#8b9ab0"
+  )
+  theme <- bslib::bs_theme(
+    version = 5,
+    bg = palette$app,
+    fg = palette$text,
+    primary = palette$accent,
+    secondary = "#4a5568",
+    success = "#22c55e",
+    danger = "#ef4444",
+    warning = "#f59e0b",
+    info = "#3b82f6",
+    base_font = bslib::font_collection(
+      "Inter", "system-ui", "-apple-system", "Segoe UI", "Roboto", "sans-serif"
+    ),
+    code_font = bslib::font_collection(
+      "JetBrains Mono", "Consolas", "Menlo", "monospace"
+    ),
+    "border-radius" = "10px",
+    "border-color" = palette$border,
+    "card-bg" = palette$card,
+    "card-cap-bg" = palette$card_header,
+    "card-border-color" = palette$border,
+    "input-bg" = palette$app,
+    "input-border-color" = palette$border_light,
+    "modal-content-bg" = palette$card,
+    "modal-content-border-color" = palette$border_light,
+    "dropdown-bg" = palette$card,
+    "dropdown-link-hover-bg" = palette$hover,
+    "text-muted" = palette$muted,
+    "link-color" = palette$accent,
+    "btn-color" = palette$app
+  )
+  bslib::bs_add_rules(
+    theme,
+    sprintf(
+      "
+      .bslib-sidebar-layout > .sidebar { background-color: %1$s; border-color: %2$s; }
+      .bslib-page-sidebar > .navbar { background-color: %1$s !important;
+                                      border-bottom: 1px solid %2$s; }
+      .bslib-page-sidebar > .navbar .bslib-page-title { background: transparent !important;
+                                                         color: %3$s !important; }
+      .btn-primary, .btn-primary:hover, .btn-primary:focus { color: %4$s; font-weight: 600; }
+      .alert-warning { background-color: rgba(245, 158, 11, 0.10); color: #fbbf24;
+                       border-color: rgba(245, 158, 11, 0.35); }
+      .alert-success { background-color: rgba(34, 197, 94, 0.10); color: #4ade80;
+                       border-color: rgba(34, 197, 94, 0.35); }
+      .alert-danger  { background-color: rgba(239, 68, 68, 0.10); color: #f87171;
+                       border-color: rgba(239, 68, 68, 0.35); }
+      .card-header.text-bg-warning { background-color: rgba(245, 158, 11, 0.15) !important;
+                                     color: #fbbf24 !important; }
+      .selectize-input, .selectize-input.full, .selectize-dropdown {
+        background: %4$s; color: %3$s; border-color: %5$s; }
+      .selectize-input .item { background: rgba(0, 201, 167, 0.12) !important;
+                               color: %6$s !important; border-radius: 6px; }
+      .selectize-dropdown .active { background: %7$s; color: %3$s; }
+      table.dataTable { color: %3$s; --bs-table-bg: transparent;
+                        --bs-table-striped-bg: rgba(255, 255, 255, 0.03);
+                        --bs-table-striped-color: %3$s; --bs-table-color: %3$s; }
+      table.dataTable > thead > tr > th { border-bottom-color: %5$s !important; }
+      table.dataTable tbody tr:hover > * { background-color: %7$s !important; }
+      code { color: %6$s; }
+      ",
+      palette$sidebar,
+      palette$border,
+      palette$text,
+      palette$app,
+      palette$border_light,
+      palette$accent,
+      palette$hover
+    )
+  )
+}
+
 privilege_app_ui <- function(dry_run, database, schema, log_file) {
   mode_banner <- if (dry_run) {
     shiny::div(
@@ -149,7 +237,7 @@ privilege_app_ui <- function(dry_run, database, schema, log_file) {
   bslib::page_sidebar(
     title = "DST DB privilege management",
     window_title = "DB privileges",
-    theme = bslib::bs_theme(version = 5, preset = "bootstrap"),
+    theme = privilege_app_theme(),
     sidebar = sidebar,
     mode_banner,
     bslib::navset_card_underline(grant_panel, access_panel, log_panel)
@@ -361,7 +449,7 @@ privilege_app_server <- function(dry_run, log_file) {
       ) |>
         DT::formatStyle(
           "status",
-          color = DT::styleEqual("OK", "#146c43", default = "#b02a37"),
+          color = DT::styleEqual("OK", "#22c55e", default = "#ef4444"),
           fontWeight = "bold"
         )
     })
@@ -393,7 +481,7 @@ privilege_app_server <- function(dry_run, log_file) {
       ) |>
         DT::formatStyle(
           "logged",
-          color = DT::styleEqual("NOT IN LOG", "#b02a37"),
+          color = DT::styleEqual("NOT IN LOG", "#ef4444"),
           fontWeight = DT::styleEqual("NOT IN LOG", "bold")
         )
     })
