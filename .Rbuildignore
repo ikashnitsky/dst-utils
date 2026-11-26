@@ -1,2 +1,5 @@
 ^DSTutils\.Rproj$
 ^\.Rproj\.user$
+^agents\.md$
+^dev$
+^^\\.positai$$

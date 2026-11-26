@@ -16,15 +16,15 @@
 
 # TODO (EKSTRA):
 # - implement variable for whether input data is located in R or Oracle (in_data)
-#   - variabel for in_database, inkl. tjek for læse-rettigheder
+#   - variabel for in_database, inkl. tjek for lÃ¦se-rettigheder
 #   - also requires indicator for whether data is in db_psd, statprod, statudv etc
 #     - note that procedures are in db_psd
 #   - check that database and data exist (use table_exists function)
 # - implement variable for whether out_table should be returned in R or saved in Oracle (out_data)
-#   - tilføj variabel for out_database, inkl. tjek for skrive-rettigheder
-#   - i SAS-makroen gemmes data ved output til Oracle blot i &prefix_name&v_koerselsid i ident-skema på PSD
+#   - tilfÃ¸j variabel for out_database, inkl. tjek for skrive-rettigheder
+#   - i SAS-makroen gemmes data ved output til Oracle blot i &prefix_name&v_koerselsid i ident-skema pÃ¥ PSD
 #     - do the same here?
-# - opdatér 'column_name' til at tages som input i funktion
+# - opdatÃ©r 'column_name' til at tages som input i funktion
 #   - problem: right now Oracle procedures do not take table name as input
 # - update code to only fetch unique rows when data passes through the environment
 # - test functions on person IDs with shifts
@@ -32,15 +32,15 @@
 # TODO (FEJL OG TJEK):
 # - check that it is the correct column (name, type, length etc)
 #   - check name (DONE)
-#   - lav en variabel 'column_name' som i SAS (DONE), så det let kan udtages til tjek i Oracle (mangler)
+#   - lav en variabel 'column_name' som i SAS (DONE), sÃ¥ det let kan udtages til tjek i Oracle (mangler)
 #   - also check column type (right now character, factor, and integer work - but does this also apply in Oracle) and column length (maybe only relevant for Oracle?)
 # - remember to have toupper() for all name checks
 
-# TODO (UNDERSØG):
+# TODO (UNDERSÃ˜G):
 # - investigate: which format do people typically insert for dates and times?
 # - is it a problem that R does not include milliseconds in the datetime format?
 #   - dte er ikke et problem i at hente, men er der nogen, der user millisekunder til at matche?
-# - hvordan holder folk styr på, hvornår man skal bruge validity_date+registry_time eller registry_start_time+registry_end_time?
+# - hvordan holder folk styr pÃ¥, hvornÃ¥r man skal bruge validity_date+registry_time eller registry_start_time+registry_end_time?
 # - how does the function behave if one has not gained access to the conversion tables or to PSD?
 
 # Create function -------------------------------------------------------------
@@ -96,13 +96,19 @@ convert_person_id <- function(
   database <- stringr::str_remove_all(deparse(substitute(database)), '^"|"$')
   in_data <- stringr::str_remove_all(deparse(substitute(in_data)), '^"|"$')
   out_data <- stringr::str_remove_all(deparse(substitute(out_data)), '^"|"$')
-  recipient <- dplyr::if_else(
-    deparse(substitute(recipient)) == "Sys.getenv(\"USERNAME\")",
-    recipient, # only update if it is input, otherwise keep username command
+  recipient <- if (deparse(substitute(recipient)) == "Sys.getenv(\"USERNAME\")") {
+    recipient # only update if it is input, otherwise keep username command
+  } else {
     stringr::str_remove_all(deparse(substitute(recipient)), '^"|"$')
+  }
+  out_table_name <- stringr::str_remove_all(
+    deparse(substitute(out_table_name)),
+    '^"|"$'
   )
-  out_table_name <- stringr::str_remove_all(deparse(substitute(out_table_name)), '^"|"$')
-  project_id <- stringr::str_remove_all(deparse(substitute(project_id)), '^"|"$')
+  project_id <- stringr::str_remove_all(
+    deparse(substitute(project_id)),
+    '^"|"$'
+  )
 
   if (procedure == "NULL") {
     procedure <- NULL
@@ -296,7 +302,7 @@ convert_person_id <- function(
   proc_rights <- DBI::dbGetQuery(
     psd,
     paste0(
-      "SELECT privilege FROM user_tab_privs 
+      "SELECT privilege FROM user_tab_privs
                                       WHERE table_name = '",
       package,
       "'"
@@ -314,14 +320,14 @@ convert_person_id <- function(
 
   # Check data is input
   if (is.null(in_table_name) & toupper(procedure) != "BEF_INVALIDE") {
-    stop("Angiv navnet på input-tabellen (in_table_name=).")
+    stop("Angiv navnet p\u00e5 input-tabellen (in_table_name=).")
   }
 
   #####TODO: set up and correct for different output and input data and locations
 
   if (is.null(out_table_name) & toupper(out_data) == "ORACLE") {
     stop(
-      "Angiv navnet på output-tabellen (out_table_name=), der gemmes i Oracle (out_data=ORACLE)."
+      "Angiv navnet p\u00e5 output-tabellen (out_table_name=), der gemmes i Oracle (out_data=ORACLE)."
     )
   }
 
@@ -401,10 +407,10 @@ convert_person_id <- function(
       is.null(registry_end_time)
   ) {
     # Run procedure - automatically saves table in ident schema and saves the run id in psdmytemp
-    DSTdb::oracleProc(
+    ROracle::oracleProc(
       psd,
       paste0(
-        "DECLARE  v_resultat VARCHAR2(200); 
+        "DECLARE  v_resultat VARCHAR2(200);
                                    v_koerselsid NUMBER;\n",
         "BEGIN ",
         package01,
@@ -413,14 +419,14 @@ convert_person_id <- function(
         "
                                   (p_projektnummer => '",
         project_id,
-        "', 
-                                  p_user => '",
+        "',
+                                  p_bruger => '",
         recipient,
-        "', 
-                                  p_in_table_name => 'BEF_ID_PROC', 
-                                  p_resultat => v_resultat, 
+        "',
+                                  p_ind_tabelnavn => 'BEF_ID_PROC',
+                                  p_resultat => v_resultat,
                                   p_koerselsid => v_koerselsid);
-  
+
                                   -- Insert values into mytemp to identify output table later
                                   insert into psdmytemp values (v_resultat,V_koerselsid);
                               COMMIT;
@@ -442,10 +448,10 @@ convert_person_id <- function(
   ) {
     # Run procedure - procedures with a date
     # Run procedure - automatically saves table in ident schema and saves the run id in psdmytemp
-    DSTdb::oracleProc(
+    ROracle::oracleProc(
       psd,
       paste0(
-        "DECLARE  v_resultat VARCHAR2(200); 
+        "DECLARE  v_resultat VARCHAR2(200);
                                    v_koerselsid NUMBER;\n",
         "BEGIN ",
         package01,
@@ -454,17 +460,17 @@ convert_person_id <- function(
         "
                                   (p_projektnummer => '",
         project_id,
-        "', 
-                                  p_user => '",
+        "',
+                                  p_bruger => '",
         recipient,
-        "', 
-                                  p_in_table_name => 'BEF_ID_PROC',
-                                  p_validity_date => TO_DATE('",
+        "',
+                                  p_ind_tabelnavn => 'BEF_ID_PROC',
+                                  p_gyldighedsdato=> TO_DATE('",
         validity_date,
         "','YYYY-MM-DD'),
-                                  p_resultat => v_resultat, 
+                                  p_resultat => v_resultat,
                                   p_koerselsid => v_koerselsid);
-  
+
                                   -- Insert values into mytemp to identify output table later
                                   insert into psdmytemp values (v_resultat,V_koerselsid);
                               COMMIT;
@@ -519,10 +525,10 @@ convert_person_id <- function(
     }
 
     # Run procedure - automatically saves table in ident schema and saves the run id in psdmytemp
-    DSTdb::oracleProc(
+    ROracle::oracleProc(
       psd,
       paste0(
-        "DECLARE  v_resultat VARCHAR2(200); 
+        "DECLARE  v_resultat VARCHAR2(200);
                                    v_koerselsid NUMBER;\n",
         "BEGIN ",
         package01,
@@ -531,20 +537,20 @@ convert_person_id <- function(
         "
                                   (p_projektnummer => '",
         project_id,
-        "', 
-                                  p_user => '",
+        "',
+                                  p_bruger => '",
         recipient,
-        "', 
-                                  p_in_table_name => 'BEF_ID_PROC',
-                                  p_validity_date => TO_DATE('",
+        "',
+                                  p_ind_tabelnavn => 'BEF_ID_PROC',
+                                  p_gyldighedsdato=> TO_DATE('",
         validity_date,
         "','YYYY-MM-DD'),
                                   p_registerdato => TO_TIMESTAMP ('",
         registry_time,
         "','YYYY-MM-DD HH24:MI:SS.FF'),
-                                  p_resultat => v_resultat, 
+                                  p_resultat => v_resultat,
                                   p_koerselsid => v_koerselsid);
-  
+
                                   -- Insert values into mytemp to identify output table later
                                   insert into psdmytemp values (v_resultat,V_koerselsid);
                               COMMIT;
@@ -565,10 +571,10 @@ convert_person_id <- function(
   ) {
     # Run procedure - procedures with dates and time (fuld historisk)
     # Run procedure - automatically saves table in ident schema and saves the run id in psdmytemp
-    DSTdb::oracleProc(
+    ROracle::oracleProc(
       psd,
       paste0(
-        "DECLARE  v_resultat VARCHAR2(200); 
+        "DECLARE  v_resultat VARCHAR2(200);
                                    v_koerselsid NUMBER;\n",
         "BEGIN ",
         package01,
@@ -577,24 +583,24 @@ convert_person_id <- function(
         "
                                   (p_projektnummer => '",
         project_id,
-        "', 
-                                  p_user => '",
+        "',
+                                  p_bruger => '",
         recipient,
-        "', 
-                                  p_in_table_name => 'BEF_ID_PROC',
-                								  p_registry_start_time => TO_TIMESTAMP ('",
+        "',
+                                  p_ind_tabelnavn => 'BEF_ID_PROC',
+                								  p_registerstarttid => TO_TIMESTAMP ('",
         date_start,
         " ",
         time_start,
         "','YYYY-MM-DD HH24:MI:SS.FF'),
-                								  p_registry_end_time => TO_TIMESTAMP ('",
+                								  p_registersluttid => TO_TIMESTAMP ('",
         date_end,
         " ",
         time_end,
         "','YYYY-MM-DD HH24:MI:SS.FF'),
-                                  p_resultat => v_resultat, 
+                                  p_resultat => v_resultat,
                                   p_koerselsid => v_koerselsid);
-  
+
                                   -- Insert values into mytemp to identify output table later
                                   insert into psdmytemp values (v_resultat,V_koerselsid);
                               COMMIT;
@@ -611,10 +617,10 @@ convert_person_id <- function(
   ) {
     # Run procedure - bef_invalide without dates (no input table)
     # Run procedure - automatically saves table in ident schema and saves the run id in psdmytemp
-    DSTdb::oracleProc(
+    ROracle::oracleProc(
       psd,
       paste0(
-        "DECLARE  v_resultat VARCHAR2(200); 
+        "DECLARE  v_resultat VARCHAR2(200);
                                    v_koerselsid NUMBER;\n",
         "BEGIN ",
         package01,
@@ -623,13 +629,13 @@ convert_person_id <- function(
         "
                                   (p_projektnummer => '",
         project_id,
-        "', 
-                                  p_user => '",
+        "',
+                                  p_bruger => '",
         recipient,
-        "', 
-                                  p_resultat => v_resultat, 
+        "',
+                                  p_resultat => v_resultat,
                                   p_koerselsid => v_koerselsid);
-  
+
                                   -- Insert values into mytemp to identify output table later
                                   insert into psdmytemp values (v_resultat,V_koerselsid);
                               COMMIT;
@@ -646,10 +652,10 @@ convert_person_id <- function(
   ) {
     # Run procedure - bef_invalide with dates (no input table)
     # Run procedure - automatically saves table in ident schema and saves the run id in psdmytemp
-    DSTdb::oracleProc(
+    ROracle::oracleProc(
       psd,
       paste0(
-        "DECLARE  v_resultat VARCHAR2(200); 
+        "DECLARE  v_resultat VARCHAR2(200);
                                    v_koerselsid NUMBER;\n",
         "BEGIN ",
         package01,
@@ -658,23 +664,23 @@ convert_person_id <- function(
         "
                                   (p_projektnummer => '",
         project_id,
-        "', 
-                                  p_user => '",
+        "',
+                                  p_bruger => '",
         recipient,
-        "', 
-                								  p_registry_start_time => TO_TIMESTAMP ('",
+        "',
+                								  p_registerstarttid => TO_TIMESTAMP ('",
         date_start,
         " ",
         time_start,
         "','YYYY-MM-DD HH24:MI:SS.FF'),
-                								  p_registry_end_time => TO_TIMESTAMP ('",
+                								  p_registersluttid => TO_TIMESTAMP ('",
         date_end,
         " ",
         time_end,
         "','YYYY-MM-DD HH24:MI:SS.FF'),
-                                  p_resultat => v_resultat, 
+                                  p_resultat => v_resultat,
                                   p_koerselsid => v_koerselsid);
-  
+
                                   -- Insert values into mytemp to identify output table later
                                   insert into psdmytemp values (v_resultat,V_koerselsid);
                               COMMIT;
@@ -686,7 +692,7 @@ convert_person_id <- function(
       (is.null(registry_start_time) & !is.null(registry_end_time))
   ) {
     stop(
-      "En af parameterene registry_start_time eller registry_end_time er udfyldt, enten skal begge eller ingen være udfyldt."
+      "En af parameterene registry_start_time eller registry_end_time er udfyldt, enten skal begge eller ingen v\u00e6re udfyldt."
     )
   } else {
     stop(

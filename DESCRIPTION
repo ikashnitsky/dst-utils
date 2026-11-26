@@ -1,14 +1,15 @@
 Package: DSTutils
 Title: DST Utilities for Data Transformation Pipelines
-Version: 0.1.0
+Version: 0.2.1
 Authors@R: 
     c(
         person(
-    "Milla", "Zacho Lessél", role = c("aut", "cre")
+    "Ilya", "Kashnitsky", role = c("aut", "cre"),
+    email = "ikx@dst.dk",
+    comment = c(ORCID = "0000-0003-1835-8687")
   ),
         person(
-    "Ilya", "Kashnitsky", role = c("aut"),
-    comment = c(ORCID = "0000-0003-1835-8687")
+    "Milla", "Zacho Lessél", role = c("aut")
   ),
         person(
     "Emil", "Thranholm", role = c("ctb")
@@ -17,19 +18,31 @@ Authors@R:
     "Sarah", "Neisig Andersen", role = c("ctb")
   )
     )
-Description: Utilities for data transformation pipelines at Statistics Denmark. Currently contains functions to invoke person ID conversion from R.
+Description: Utilities for data transformation pipelines at Statistics Denmark. Currently contains: person ID conversion, CPR screening, shiny app to manage DB priviledges
 License: MIT + file LICENSE
 Encoding: UTF-8
 Roxygen: list(markdown = TRUE)
-RoxygenNote: 7.3.3
+Depends:
+    R (>= 4.1.0)
 Imports:
     dplyr,
+    purrr,
+    stringr,
     lubridate,
-    rlang,
+    tidyselect,
     DBI,
     ROracle,
     DSTdb,
-    stringr
+    stringfish,
+    collapse,
+    kit,
+    haven,
+    nanoparquet,
+    tictoc,
+    shiny
 Suggests: 
-    testthat (>= 3.0.0)
+    testthat (>= 3.0.0),
+    tibble
 Config/testthat/edition: 3
+LazyData: true
+Config/roxygen2/version: 8.1.0

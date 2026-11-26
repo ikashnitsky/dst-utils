@@ -1,0 +1,28 @@
+{
+  "permission": {
+    "executeCode": {
+      "*": "allow"
+    },
+    "bash": {
+      "powershell *": "allow",
+      "*": "allow"
+    },
+    "edit": {
+      "*.tmp": "allow",
+      "*.R": "allow",
+      "*/DESCRIPTION": "allow",
+      "*.md": "allow"
+    },
+    "external_directory": {
+      "e:/Users/IKX/.local/state/positron/logs/20260727T080627/window1/exthost/posit.assistant/tools/executeCode/*": "allow",
+      "h:/box/261123-gifion-leak/scan/patch/*": "allow"
+    },
+    "read": {
+      "*.R": "allow",
+      "*.css": "allow",
+      "*.csv": "allow",
+      "*": "allow",
+      "*/DESCRIPTION": "allow"
+    }
+  }
+}

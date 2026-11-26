@@ -1,3 +1,5 @@
+utils::globalVariables("PNR")
+
 #' @title Convert PNR to PERSON_ID
 #' @description This function takes a table with a PNR column and adds a PERSON_ID column.
 #' @param data A data.frame containing a PNR column.
